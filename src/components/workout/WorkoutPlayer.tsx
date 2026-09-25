@@ -22,8 +22,10 @@ import {
 import { useFitnessStore } from '@/lib/store/fitness-store';
 import { ExerciseDemoModal } from './ExerciseDemoModal';
 import { RPEFeedbackModal } from './RPEFeedbackModal';
-import { EXERCISE_LIBRARY_DATA } from '@/lib/data/exercise-data';
 import { soundEffects } from '@/lib/utils/audio';
+import { buildExerciseDetails, findLibraryExercise } from '@/lib/fitness/exercise-media';
+import { isTimedCategory } from '@/lib/fitness/workout-options';
+import { EXERCISE_LIBRARY_DATA } from '@/lib/data/exercise-data';
 import { ExerciseItem } from '@/types/fitness';
 
 export function WorkoutPlayer() {
@@ -95,10 +97,24 @@ export function WorkoutPlayer() {
   const isLastExercise = currentExerciseIndex === totalExercises - 1;
   const isLastSet = currentSetIndex === currentExercise.sets.length - 1;
 
-  // Matching Exercise Library entry for video/details
-  const libraryEntry = EXERCISE_LIBRARY_DATA.find(
-    e => e.name.toLowerCase() === currentExercise.exerciseName.toLowerCase()
-  ) || EXERCISE_LIBRARY_DATA[0];
+  // AI-prescribed details, enriched with curated library media when the name matches
+  const exerciseDetails = buildExerciseDetails(currentExercise);
+  const isTimed = isTimedCategory(currentExercise.category, currentExercise.durationMins);
+  const showWeight = !isTimed && currentExercise.category !== 'mobility';
+
+  // Swap candidates: the AI's own alternatives first, then library movements for the same muscle
+  const libraryMatch = findLibraryExercise(currentExercise.exerciseName);
+  const swapOptions: { name: string; detail: string }[] = [
+    ...(currentExercise.alternatives || []).map(name => ({ name, detail: 'AI-suggested alternative' })),
+    ...EXERCISE_LIBRARY_DATA.filter(
+      e =>
+        e.name !== currentExercise.exerciseName &&
+        (e.targetMuscle === (currentExercise.targetMuscle || libraryMatch?.targetMuscle) ||
+          (libraryMatch && e.category === libraryMatch.category))
+    ).map(e => ({ name: e.name, detail: `${e.targetMuscle} • ${e.equipmentRequired}` })),
+  ]
+    .filter((opt, idx, arr) => arr.findIndex(o => o.name.toLowerCase() === opt.name.toLowerCase()) === idx)
+    .slice(0, 6);
 
   const handleCompleteSet = () => {
     soundEffects.playBeep(880, 0.15);
@@ -117,11 +133,11 @@ export function WorkoutPlayer() {
       return { ...session, exercises: updatedExercises };
     });
 
-    // Start rest timer
-    const restSec = 60;
+    // Start rest timer using the prescribed rest interval
+    const restSec = currentExercise.restSeconds ?? 60;
     setTotalRestDuration(restSec);
     setRestSecondsLeft(restSec);
-    setIsResting(true);
+    setIsResting(restSec > 0);
 
     // Advance set or exercise
     if (!isLastSet) {
@@ -170,6 +186,12 @@ export function WorkoutPlayer() {
       updatedExercises[currentExerciseIndex] = {
         ...updatedExercises[currentExerciseIndex],
         exerciseName: altName,
+        // Media & how-to belong to the replaced exercise; re-resolve for the new one.
+        exerciseId: undefined,
+        videoUrl: undefined,
+        instructions: [],
+        formNotes: undefined,
+        alternatives: (updatedExercises[currentExerciseIndex].alternatives || []).filter(a => a !== altName),
       };
       return { ...session, exercises: updatedExercises };
     });
@@ -283,10 +305,10 @@ export function WorkoutPlayer() {
             <div>
               <div className="flex items-center gap-2 mb-1.5">
                 <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
-                  {libraryEntry.targetMuscle}
+                  {exerciseDetails.targetMuscle}
                 </span>
                 <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-slate-800 text-slate-300">
-                  {libraryEntry.equipmentRequired}
+                  {exerciseDetails.equipmentRequired}
                 </span>
               </div>
               <h2 className="text-3xl sm:text-4xl font-black text-white tracking-tight">
@@ -296,7 +318,7 @@ export function WorkoutPlayer() {
 
             <div className="flex items-center gap-2">
               <button
-                onClick={() => setDemoModalExercise(libraryEntry)}
+                onClick={() => setDemoModalExercise(exerciseDetails)}
                 className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 border border-white/10 hover:border-emerald-500/40 text-xs font-bold text-emerald-400 hover:text-white transition"
               >
                 <Video className="h-4 w-4" />
@@ -324,9 +346,10 @@ export function WorkoutPlayer() {
               </div>
             </div>
 
-            {/* WEIGHT & REPS ADJUSTERS */}
-            <div className="grid grid-cols-2 gap-4 max-w-md mx-auto my-6">
+            {/* WEIGHT & REPS (or MINUTES for timed cardio / sport blocks) ADJUSTERS */}
+            <div className={`grid ${showWeight ? 'grid-cols-2' : 'grid-cols-1'} gap-4 max-w-md mx-auto my-6`}>
               {/* WEIGHT CONTROL */}
+              {showWeight && (
               <div className="p-4 rounded-2xl bg-slate-950 border border-white/5 text-center">
                 <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2">
                   Weight (kg)
@@ -347,11 +370,12 @@ export function WorkoutPlayer() {
                   </button>
                 </div>
               </div>
+              )}
 
               {/* REPS CONTROL */}
               <div className="p-4 rounded-2xl bg-slate-950 border border-white/5 text-center">
                 <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block mb-2">
-                  Completed Reps
+                  {isTimed ? 'Completed Minutes' : 'Completed Reps'}
                 </span>
                 <div className="flex items-center justify-between">
                   <button
@@ -392,9 +416,9 @@ export function WorkoutPlayer() {
             </div>
 
             {/* FORM NOTE & TIP */}
-            {libraryEntry.formTips.length > 0 && (
+            {exerciseDetails.formTips.length > 0 && (
               <p className="text-xs text-center text-slate-400 max-w-lg mx-auto italic mt-4">
-                💡 Tip: {libraryEntry.formTips[0]}
+                💡 Tip: {exerciseDetails.formTips[0]}
               </p>
             )}
           </div>
@@ -471,15 +495,18 @@ export function WorkoutPlayer() {
               Replace <strong className="text-white">{currentExercise.exerciseName}</strong> with an alternative targeting the same muscle group:
             </p>
             <div className="space-y-2">
-              {EXERCISE_LIBRARY_DATA.filter(e => e.name !== currentExercise.exerciseName).slice(0, 5).map(alt => (
+              {swapOptions.length === 0 && (
+                <p className="text-xs text-slate-500 text-center py-3">No alternatives were suggested for this block.</p>
+              )}
+              {swapOptions.map(alt => (
                 <button
-                  key={alt.id}
+                  key={alt.name}
                   onClick={() => handleSwapExercise(alt.name)}
                   className="w-full p-3 rounded-xl bg-slate-950 hover:bg-slate-800 border border-white/5 flex items-center justify-between text-left transition"
                 >
                   <div>
                     <p className="text-sm font-bold text-white">{alt.name}</p>
-                    <p className="text-xs text-slate-400">{alt.targetMuscle} • {alt.equipmentRequired}</p>
+                    <p className="text-xs text-slate-400">{alt.detail}</p>
                   </div>
                   <Check className="h-4 w-4 text-emerald-400" />
                 </button>

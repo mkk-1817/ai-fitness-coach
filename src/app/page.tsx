@@ -7,11 +7,21 @@ import { MacroRings } from '@/components/dashboard/MacroRings';
 import { WaterTracker } from '@/components/dashboard/WaterTracker';
 import { StreakMilestone } from '@/components/dashboard/StreakMilestone';
 import { AICoachInsight } from '@/components/dashboard/AICoachInsight';
+import { GenerationStatus } from '@/components/ai/GenerationStatus';
 import { Dumbbell, Utensils, MessageSquare, Plus, TrendingUp, Sparkles } from 'lucide-react';
 import { useFitnessStore } from '@/lib/store/fitness-store';
+import { workoutTypeLabel } from '@/lib/fitness/workout-options';
 
 export default function DashboardPage() {
-  const { profile, workoutPlan } = useFitnessStore();
+  const {
+    profile,
+    workoutPlan,
+    workoutGeneration,
+    dietGeneration,
+    retryWorkoutGeneration,
+    retryDietGeneration,
+    dismissGenerationState,
+  } = useFitnessStore();
 
   return (
     <div className="space-y-6 sm:space-y-8 animate-in fade-in duration-300">
@@ -50,6 +60,20 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* AI PLAN GENERATION PROGRESS / ERRORS */}
+      <GenerationStatus
+        state={workoutGeneration}
+        label="workout plan"
+        onRetry={retryWorkoutGeneration}
+        onDismiss={() => dismissGenerationState('workout')}
+      />
+      <GenerationStatus
+        state={dietGeneration}
+        label="7-day meal plan"
+        onRetry={retryDietGeneration}
+        onDismiss={() => dismissGenerationState('meal')}
+      />
+
       {/* AI COACH DAILY INSIGHT */}
       <AICoachInsight />
 
@@ -79,7 +103,7 @@ export default function DashboardPage() {
             </div>
 
             <p className="text-xs text-slate-400 mb-4">
-              {workoutPlan?.splitType || 'Upper/Lower Split'} • {profile.availableEquipment.join(', ')}
+              {workoutPlan ? workoutPlan.splitType : 'No AI plan generated yet'} • {profile.availableEquipment.join(', ')}
             </p>
 
             <div className="space-y-2.5">
@@ -92,7 +116,7 @@ export default function DashboardPage() {
                   <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${
                     d.isRestDay ? 'bg-teal-500/10 text-teal-400' : 'bg-emerald-500/10 text-emerald-400'
                   }`}>
-                    {d.isRestDay ? 'Rest' : `${d.exercises.length} Ex`}
+                    {d.isRestDay ? 'Rest' : workoutTypeLabel(d.sessionType)}
                   </span>
                 </div>
               ))}

@@ -34,11 +34,12 @@ export function ExerciseLibraryView() {
               <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
                 Exercise Database
               </span>
-              <span className="text-xs text-slate-400">{EXERCISE_LIBRARY_DATA.length} Verified Movements</span>
+              <span className="text-xs text-slate-400">{EXERCISE_LIBRARY_DATA.length} Video-Verified Movements</span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-black text-white">Exercise Library & Video Guides</h1>
             <p className="text-xs sm:text-sm text-slate-400 mt-1 max-w-xl">
-              Step-by-step movement instructions, form cues, common mistakes, and video demonstrations.
+              Step-by-step movement instructions, form cues, common mistakes, and video demonstrations for core movements.
+              Your AI plans aren&apos;t limited to this list — every prescribed exercise and sport has its own how-to in the plan.
             </p>
           </div>
 

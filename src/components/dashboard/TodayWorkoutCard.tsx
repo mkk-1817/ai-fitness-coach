@@ -6,15 +6,23 @@ import { useRouter } from 'next/navigation';
 import { Dumbbell, Clock, Flame, Play, CheckCircle2, ChevronRight, Video, Sparkles } from 'lucide-react';
 import { useFitnessStore } from '@/lib/store/fitness-store';
 import { ExerciseDemoModal } from '../workout/ExerciseDemoModal';
-import { EXERCISE_LIBRARY_DATA } from '@/lib/data/exercise-data';
-import { ExerciseItem } from '@/types/fitness';
+import { buildExerciseDetails } from '@/lib/fitness/exercise-media';
+import { isTimedCategory, workoutTypeLabel } from '@/lib/fitness/workout-options';
+import { ExerciseItem, WorkoutExercise } from '@/types/fitness';
 
 export function TodayWorkoutCard() {
   const router = useRouter();
-  const { workoutPlan, startWorkout, activeSession, generateNewWorkoutPlan, isLoadingAI } = useFitnessStore();
+  const { workoutPlan, startWorkout, activeSession, generateNewWorkoutPlan, retryWorkoutGeneration, workoutGeneration } = useFitnessStore();
+  const isGenerating = workoutGeneration.status === 'loading';
   const [selectedDemoExercise, setSelectedDemoExercise] = useState<ExerciseItem | null>(null);
 
-  const activeDay = workoutPlan?.days.find(d => !d.isRestDay) || workoutPlan?.days[0];
+  // Plans run Monday (dayOrder 1) → Sunday (7); show today's session or the next training day.
+  const todayOrder = ((new Date().getDay() + 6) % 7) + 1;
+  const orderedDays = [...(workoutPlan?.days || [])].sort((a, b) => a.dayOrder - b.dayOrder);
+  const activeDay =
+    orderedDays.find(d => d.dayOrder >= todayOrder && !d.isRestDay) ||
+    orderedDays.find(d => !d.isRestDay) ||
+    orderedDays[0];
 
   const handleStartWorkout = () => {
     if (activeDay) {
@@ -23,9 +31,8 @@ export function TodayWorkoutCard() {
     }
   };
 
-  const handleOpenDemo = (exerciseName: string) => {
-    const found = EXERCISE_LIBRARY_DATA.find(e => e.name.toLowerCase() === exerciseName.toLowerCase()) || EXERCISE_LIBRARY_DATA[0];
-    setSelectedDemoExercise(found);
+  const handleOpenDemo = (exercise: WorkoutExercise) => {
+    setSelectedDemoExercise(buildExerciseDetails(exercise));
   };
 
   if (!workoutPlan) {
@@ -36,16 +43,26 @@ export function TodayWorkoutCard() {
         </div>
         <h3 className="text-xl font-bold text-white mb-2">No Active Workout Plan</h3>
         <p className="text-sm text-slate-400 max-w-md mx-auto mb-6">
-          Our Groq AI Coach is ready to tailor a customized workout routine based on your goals, equipment, and schedule.
+          Our Groq AI Coach is ready to tailor a customized workout routine — strength, cardio, sports, HIIT or mobility — based on your goals, equipment, and schedule.
         </p>
-        <button
-          onClick={() => generateNewWorkoutPlan()}
-          disabled={isLoadingAI}
-          className="inline-flex items-center gap-2 rounded-2xl bg-emerald-500 px-6 py-3 text-sm font-bold text-slate-950 shadow-lg shadow-emerald-500/25 hover:bg-emerald-400 transition"
-        >
-          <Sparkles className="h-4 w-4" />
-          {isLoadingAI ? 'Generating with AI...' : 'Generate AI Workout Plan'}
-        </button>
+        {workoutGeneration.status === 'error' && (
+          <p className="text-xs text-rose-300 max-w-md mx-auto mb-4" role="alert">
+            {workoutGeneration.error}
+          </p>
+        )}
+        <div className="flex flex-wrap items-center justify-center gap-3">
+          <button
+            onClick={() => (workoutGeneration.status === 'error' ? retryWorkoutGeneration() : generateNewWorkoutPlan())}
+            disabled={isGenerating}
+            className="inline-flex items-center gap-2 rounded-2xl bg-emerald-500 px-6 py-3 text-sm font-bold text-slate-950 shadow-lg shadow-emerald-500/25 hover:bg-emerald-400 disabled:opacity-60 transition"
+          >
+            <Sparkles className={`h-4 w-4 ${isGenerating ? 'animate-spin' : ''}`} />
+            {isGenerating ? 'Generating with AI...' : workoutGeneration.status === 'error' ? 'Retry Generation' : 'Generate AI Workout Plan'}
+          </button>
+          <Link href="/workout" className="text-xs font-semibold text-emerald-400 hover:text-emerald-300">
+            Choose workout type & sports →
+          </Link>
+        </div>
       </div>
     );
   }
@@ -63,7 +80,7 @@ export function TodayWorkoutCard() {
               <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wide uppercase bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
                 Today&apos;s Focus
               </span>
-              <span className="text-xs text-slate-400">{activeDay?.dayName}</span>
+              <span className="text-xs text-slate-400">{activeDay?.dayName} • {workoutTypeLabel(activeDay?.sessionType)}</span>
             </div>
             <h2 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-white">
               {activeDay?.focus}
@@ -85,7 +102,7 @@ export function TodayWorkoutCard() {
         {/* EXERCISES LIST PREVIEW */}
         <div className="my-5 space-y-2.5">
           <div className="flex items-center justify-between text-xs font-semibold text-slate-400 uppercase tracking-wider px-1">
-            <span>Prescribed Exercises ({activeDay?.exercises.length || 0})</span>
+            <span>Prescribed Blocks ({activeDay?.exercises.length || 0})</span>
             <Link href="/workout" className="text-emerald-400 hover:text-emerald-300 flex items-center gap-0.5 normal-case">
               View details <ChevronRight className="h-3 w-3" />
             </Link>
@@ -104,13 +121,15 @@ export function TodayWorkoutCard() {
                   <div className="min-w-0">
                     <p className="text-sm font-semibold text-white truncate">{ex.exerciseName}</p>
                     <p className="text-xs text-slate-400">
-                      {ex.sets} sets × {ex.reps} • {ex.equipment}
+                      {isTimedCategory(ex.category, ex.durationMins)
+                        ? `${ex.reps}${ex.intensity ? ` • ${ex.intensity}` : ''}`
+                        : `${ex.sets} sets × ${ex.reps} • ${ex.equipment}`}
                     </p>
                   </div>
                 </div>
 
                 <button
-                  onClick={() => handleOpenDemo(ex.exerciseName)}
+                  onClick={() => handleOpenDemo(ex)}
                   className="shrink-0 p-2 rounded-xl text-slate-400 hover:text-emerald-400 hover:bg-slate-900 transition flex items-center gap-1 text-xs"
                   title="Watch Video Demonstration"
                 >
@@ -125,7 +144,7 @@ export function TodayWorkoutCard() {
         <div className="pt-3 flex flex-col sm:flex-row items-center justify-between gap-3">
           <div className="text-xs text-slate-400 flex items-center gap-2">
             <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
-            <span>AI progressive overload tracking active for this routine</span>
+            <span>AI-generated for your goals, equipment & activities</span>
           </div>
 
           <button

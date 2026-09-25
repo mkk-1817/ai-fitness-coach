@@ -12,11 +12,67 @@ import {
   AIMessage, 
   GamificationBadge, 
   NotificationItem,
-  WeeklyReview
+  WeeklyReview,
+  WorkoutGenerationOptions,
+  DietGenerationOptions,
+  MealPlanDayTotals,
+  MealItem,
 } from '@/types/fitness';
-import { EXERCISE_LIBRARY_DATA } from '../data/exercise-data';
-import { FOOD_DATABASE } from '../data/food-data';
+import type { AIMealPlanResponse, AIWorkoutPlanResponse } from '@/types/ai';
 import { computeAllMetrics } from '../utils/calculations';
+import { postAI, describeError } from '../ai/request';
+import { computeMealDayTotals } from '../groq/plan-review';
+import { defaultDietOptions, defaultWorkoutOptions, isTimedCategory } from '../fitness/workout-options';
+import {
+  PlanKind,
+  activatePlan,
+  clearLocalPlanHistory,
+  deletePlan,
+  listPlans,
+  saveNewPlan,
+  updatePlan,
+} from '../plans/plan-repository';
+
+export interface GenerationState {
+  status: 'idle' | 'loading' | 'error' | 'success';
+  error?: string;
+  details?: string[];
+  retryable?: boolean;
+  /** Non-blocking notes from response validation (e.g. a day slightly off the calorie target). */
+  warnings?: string[];
+  /** Set when the plan could not be saved to Supabase and was kept on this device instead. */
+  storageNote?: string;
+}
+
+const IDLE: GenerationState = { status: 'idle' };
+
+interface WorkoutApiResponse {
+  plan: Omit<AIWorkoutPlanResponse, 'days'> & {
+    days: (Omit<AIWorkoutPlanResponse['days'][number], 'exercises'> & {
+      exercises: (AIWorkoutPlanResponse['days'][number]['exercises'][number] & { exerciseId?: string; videoUrl: string })[];
+    })[];
+  };
+  options: WorkoutGenerationOptions;
+  meta: { model: string; attempts: number; warnings: string[] };
+}
+
+interface DietApiResponse {
+  plan: Omit<AIMealPlanResponse, 'days'> & {
+    targetCalories: number;
+    targetProteinG: number;
+    targetCarbsG: number;
+    targetFatG: number;
+    days: (AIMealPlanResponse['days'][number] & { totals: MealPlanDayTotals })[];
+  };
+  options: DietGenerationOptions;
+  meta: { model: string; attempts: number; warnings: string[] };
+}
+
+/** Plans created by the pre-AI seed engine are never shown as if they were AI output. */
+const LEGACY_SEED_PLAN_IDS = new Set(['plan_default', 'diet_default']);
+
+const round1 = (n: number) => Math.round(n * 10) / 10;
+
 
 // ==============================================================================
 // INITIAL DEMO PROFILE (Realistic starting state for instant exploration)
@@ -44,6 +100,8 @@ const DEMO_PROFILE: FitnessProfile = {
   preferredWorkoutTime: 'morning',
   trainingLocation: 'home',
   availableEquipment: ['Dumbbells', 'Bodyweight', 'Resistance Bands', 'Yoga Mat', 'Pull-up Bar'],
+  preferredWorkoutType: 'mixed',
+  preferredActivities: ['Walking', 'Badminton'],
   healthConditions: [],
   injuries: ['Mild lower back tightness'],
   avoidExercises: ['Heavy Barbell Deadlift'],
@@ -80,24 +138,39 @@ export const INITIAL_NOTIFICATIONS: NotificationItem[] = [
   { id: 'notif-3', title: 'Coach Insight', message: 'Your bench press progression is tracking +2.5kg over last week!', type: 'milestone', createdAt: '2026-09-24T18:30:00Z', read: true }
 ];
 
+
 interface FitnessStoreContextType {
   profile: FitnessProfile;
   workoutPlan: WorkoutPlan | null;
+  workoutPlanHistory: WorkoutPlan[];
   workoutSessions: WorkoutSession[];
   activeSession: WorkoutSession | null;
   mealPlan: MealPlan | null;
+  mealPlanHistory: MealPlan[];
   mealLogs: MealLog[];
   waterLoggedMl: number;
   weightLogs: WeightLog[];
   bodyMeasurements: BodyMeasurementLog[];
   chatMessages: AIMessage[];
+  chatError: string | null;
   badges: GamificationBadge[];
   notifications: NotificationItem[];
   weeklyReview: WeeklyReview | null;
   isLoadingAI: boolean;
+  isHistoryLoading: boolean;
+  historyError: string | null;
+  workoutGeneration: GenerationState;
+  dietGeneration: GenerationState;
   saveProfile: (newProfile: FitnessProfile) => Promise<void>;
-  generateNewWorkoutPlan: () => Promise<void>;
-  generateNewDietPlan: () => Promise<void>;
+  /** Generates a new AI workout plan. Options default to the profile's saved preferences. */
+  generateNewWorkoutPlan: (options?: Partial<WorkoutGenerationOptions>, profileOverride?: FitnessProfile) => Promise<boolean>;
+  /** Generates a new AI 7-day meal plan. Options default to the profile's cuisines. */
+  generateNewDietPlan: (options?: Partial<DietGenerationOptions>, profileOverride?: FitnessProfile) => Promise<boolean>;
+  retryWorkoutGeneration: () => Promise<boolean>;
+  retryDietGeneration: () => Promise<boolean>;
+  dismissGenerationState: (kind: PlanKind) => void;
+  activateHistoricalPlan: (kind: PlanKind, planId: string) => Promise<void>;
+  deleteHistoricalPlan: (kind: PlanKind, planId: string) => Promise<void>;
   startWorkout: (dayId: string) => WorkoutSession;
   updateActiveSession: (updater: (prev: WorkoutSession) => WorkoutSession) => void;
   finishActiveWorkout: (feedback: { rpe: number; energy: number; soreness: number; painReported: boolean; painNotes?: string; notes?: string }) => Promise<void>;
@@ -108,6 +181,7 @@ interface FitnessStoreContextType {
   logWeight: (weightKg: number, notes?: string) => void;
   logBodyMeasurement: (measurements: Omit<BodyMeasurementLog, 'id' | 'userId' | 'date'>) => void;
   sendChatMessage: (userText: string) => Promise<void>;
+  retryLastChatMessage: () => Promise<void>;
   replaceMealWithAlternative: (mealId: string, altIndex: number) => void;
   markNotificationRead: (id: string) => void;
   clearAllNotifications: () => void;
@@ -126,18 +200,30 @@ export function FitnessStoreProvider({ children, userId }: { children: ReactNode
 
   const [profile, setProfile] = useState<FitnessProfile>(DEMO_PROFILE);
   const [workoutPlan, setWorkoutPlan] = useState<WorkoutPlan | null>(null);
+  const [workoutPlanHistory, setWorkoutPlanHistory] = useState<WorkoutPlan[]>([]);
   const [workoutSessions, setWorkoutSessions] = useState<WorkoutSession[]>([]);
   const [activeSession, setActiveSession] = useState<WorkoutSession | null>(null);
   const [mealPlan, setMealPlan] = useState<MealPlan | null>(null);
+  const [mealPlanHistory, setMealPlanHistory] = useState<MealPlan[]>([]);
   const [mealLogs, setMealLogs] = useState<MealLog[]>([]);
   const [waterLoggedMl, setWaterLoggedMl] = useState<number>(1500);
   const [weightLogs, setWeightLogs] = useState<WeightLog[]>([]);
   const [bodyMeasurements, setBodyMeasurements] = useState<BodyMeasurementLog[]>([]);
   const [chatMessages, setChatMessages] = useState<AIMessage[]>([]);
+  const [chatError, setChatError] = useState<string | null>(null);
   const [badges, setBadges] = useState<GamificationBadge[]>(INITIAL_BADGES);
   const [notifications, setNotifications] = useState<NotificationItem[]>(INITIAL_NOTIFICATIONS);
-  const [weeklyReview, setWeeklyReview] = useState<WeeklyReview | null>(null);
-  const [isLoadingAI, setIsLoadingAI] = useState<boolean>(false);
+  const [weeklyReview] = useState<WeeklyReview | null>(null);
+  const [workoutGeneration, setWorkoutGeneration] = useState<GenerationState>(IDLE);
+  const [dietGeneration, setDietGeneration] = useState<GenerationState>(IDLE);
+  const [isHistoryLoading, setIsHistoryLoading] = useState<boolean>(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+
+  // Last request per plan kind, so "Retry" re-sends exactly what failed.
+  const lastWorkoutRequestRef = useRef<{ options?: Partial<WorkoutGenerationOptions>; profile?: FitnessProfile } | null>(null);
+  const lastDietRequestRef = useRef<{ options?: Partial<DietGenerationOptions>; profile?: FitnessProfile } | null>(null);
+
+  const isLoadingAI = workoutGeneration.status === 'loading' || dietGeneration.status === 'loading';
 
   // Initialize (or re-initialize) from user-scoped localStorage whenever uid changes
   useEffect(() => {
@@ -155,19 +241,18 @@ export function FitnessStoreProvider({ children, userId }: { children: ReactNode
 
       setProfile(baseProfile);
 
+      // Cached active plans (the authoritative history is loaded below).
       const storedPlan = localStorage.getItem(key('workout_plan'));
-      if (storedPlan) {
-        setWorkoutPlan(JSON.parse(storedPlan));
-      } else {
-        createDefaultPlan(baseProfile);
-      }
+      const parsedPlan: WorkoutPlan | null = storedPlan ? JSON.parse(storedPlan) : null;
+      setWorkoutPlan(parsedPlan && !LEGACY_SEED_PLAN_IDS.has(parsedPlan.id) ? parsedPlan : null);
 
       const storedDiet = localStorage.getItem(key('meal_plan'));
-      if (storedDiet) {
-        setMealPlan(JSON.parse(storedDiet));
-      } else {
-        createDefaultDiet(baseProfile);
-      }
+      const parsedDiet: MealPlan | null = storedDiet ? JSON.parse(storedDiet) : null;
+      setMealPlan(parsedDiet && !LEGACY_SEED_PLAN_IDS.has(parsedDiet.id) ? parsedDiet : null);
+
+      setWorkoutGeneration(IDLE);
+      setDietGeneration(IDLE);
+      setChatError(null);
 
       const storedSessions = localStorage.getItem(key('sessions'));
       if (storedSessions) {
@@ -221,7 +306,7 @@ export function FitnessStoreProvider({ children, userId }: { children: ReactNode
             id: 'msg-1',
             role: 'assistant',
             content: uid === 'demo'
-              ? `Hello Alex! 👋 I am your AuraFit AI Coach. I've analyzed your profile and crafted your 4-day Upper/Lower split and high-protein South Indian nutrition targets (${DEMO_PROFILE.targetCalories} kcal, ${DEMO_PROFILE.targetProteinG}g protein). What questions or adjustments do you have today?`
+              ? `Hello Alex! 👋 I am your AuraFit AI Coach. Your daily targets are ${DEMO_PROFILE.targetCalories} kcal and ${DEMO_PROFILE.targetProteinG}g protein. Generate your AI workout and 7-day meal plans any time, then ask me for tweaks!`
               : `Welcome to AuraFit! 👋 I'm your AI Coach. Please complete your fitness assessment so I can build your personalised plan!`,
             timestamp: new Date().toISOString()
           }
@@ -237,6 +322,37 @@ export function FitnessStoreProvider({ children, userId }: { children: ReactNode
     } catch (e) {
       console.error('Error initializing fitness store:', e);
     }
+
+    // Plan history (Supabase for signed-in users, local history in demo mode)
+    // Guard by uid (not effect cleanup) so a StrictMode re-run doesn't drop the result.
+    const loadingUid = uid;
+    const cancelled = () => lastUidRef.current !== loadingUid;
+    setIsHistoryLoading(true);
+    setHistoryError(null);
+    Promise.all([listPlans(uid, 'workout'), listPlans(uid, 'meal')])
+      .then(([workouts, meals]) => {
+        if (cancelled()) return;
+        setWorkoutPlanHistory(workouts.plans);
+        setMealPlanHistory(meals.plans);
+        const activeWorkout = workouts.plans.find(p => p.isActive);
+        const activeMeal = meals.plans.find(p => p.isActive);
+        if (activeWorkout) {
+          setWorkoutPlan(activeWorkout);
+          persist('workout_plan', activeWorkout);
+        }
+        if (activeMeal) {
+          setMealPlan(activeMeal);
+          persist('meal_plan', activeMeal);
+        }
+        const err = workouts.error || meals.error;
+        if (err) setHistoryError(`Could not load saved plans from Supabase: ${err}`);
+      })
+      .catch(err => {
+        if (!cancelled()) setHistoryError(describeError(err).message);
+      })
+      .finally(() => {
+        if (!cancelled()) setIsHistoryLoading(false);
+      });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uid]);
 
@@ -376,370 +492,6 @@ export function FitnessStoreProvider({ children, userId }: { children: ReactNode
     persist('measurements', data);
   };
 
-  const createDefaultPlan = (p: FitnessProfile) => {
-    const newPlan: WorkoutPlan = {
-      id: 'plan_default',
-      userId: p.userId,
-      title: 'AuraFit 4-Week Hypertrophy & Strength Split',
-      description: 'Progressive overload training tailored to home dumbbells and bodyweight with rest intervals for recovery.',
-      goal: p.primaryGoal,
-      splitType: 'Upper / Lower Split',
-      daysPerWeek: p.workoutDaysPerWeek,
-      durationWeeks: 4,
-      aiGenerated: true,
-      aiModel: 'llama-3.3-70b-versatile',
-      isActive: true,
-      createdAt: new Date().toISOString(),
-      days: [
-        {
-          id: 'day-1',
-          dayName: 'Day 1 (Monday)',
-          dayOrder: 1,
-          focus: 'Upper Body Strength & Posture',
-          isRestDay: false,
-          estimatedDurationMins: p.workoutDurationMins,
-          warmup: ['Arm circles 30s', 'Band pull-aparts 15 reps', 'Push-up plus 10 reps'],
-          cooldown: ['Doorway chest stretch (60s)', 'Child pose breathing (1 min)'],
-          exercises: [
-            {
-              id: 'w-ex-1',
-              exerciseId: 'ex-db-bench-press',
-              exerciseName: 'Dumbbell Bench Press',
-              targetMuscle: 'Pectorals',
-              equipment: 'Dumbbells',
-              sets: 3,
-              reps: '8-10',
-              restSeconds: 90,
-              formNotes: 'Keep elbows tucked at 45 degrees, squeeze chest at top.',
-              alternatives: ['Standard Push-Up', 'Dumbbell Floor Press'],
-              videoUrl: 'https://www.youtube.com/watch?v=VmB1G1K7v94'
-            },
-            {
-              id: 'w-ex-2',
-              exerciseId: 'ex-db-row',
-              exerciseName: 'Dumbbell Bent-Over Row',
-              targetMuscle: 'Latissimus Dorsi',
-              equipment: 'Dumbbells',
-              sets: 3,
-              reps: '10-12',
-              restSeconds: 75,
-              formNotes: 'Drive elbows back towards hip pockets, squeeze shoulder blades.',
-              alternatives: ['Single-Arm Dumbbell Row'],
-              videoUrl: 'https://www.youtube.com/watch?v=6TSP13BylM0'
-            },
-            {
-              id: 'w-ex-3',
-              exerciseId: 'ex-overhead-press',
-              exerciseName: 'Dumbbell Overhead Shoulder Press',
-              targetMuscle: 'Anterior Deltoids',
-              equipment: 'Dumbbells',
-              sets: 3,
-              reps: '10-12',
-              restSeconds: 60,
-              formNotes: 'Keep core braced, avoid arching lower back.',
-              alternatives: ['Lateral Dumbbell Raise'],
-              videoUrl: 'https://www.youtube.com/watch?v=qEwKCR5JCog'
-            },
-            {
-              id: 'w-ex-4',
-              exerciseId: 'ex-bicep-curl',
-              exerciseName: 'Dumbbell Bicep Curl',
-              targetMuscle: 'Biceps Brachii',
-              equipment: 'Dumbbells',
-              sets: 3,
-              reps: '12',
-              restSeconds: 45,
-              formNotes: 'Pin elbows to sides, supinate wrist at peak.',
-              alternatives: ['Hammer Curls'],
-              videoUrl: 'https://www.youtube.com/watch?v=ykJmrZ5v0Oo'
-            }
-          ]
-        },
-        {
-          id: 'day-2',
-          dayName: 'Day 2 (Tuesday)',
-          dayOrder: 2,
-          focus: 'Lower Body Power & Core Stability',
-          isRestDay: false,
-          estimatedDurationMins: p.workoutDurationMins,
-          warmup: ['Leg swings (15/side)', 'Glute bridge activation (15 reps)', 'Bodyweight air squats (15 reps)'],
-          cooldown: ['Couch stretch for hips (1 min/side)', 'Hamstring stretch (1 min)'],
-          exercises: [
-            {
-              id: 'w-ex-5',
-              exerciseId: 'ex-goblet-squat',
-              exerciseName: 'Goblet Squat',
-              targetMuscle: 'Quadriceps',
-              equipment: 'Dumbbells',
-              sets: 3,
-              reps: '10-12',
-              restSeconds: 90,
-              formNotes: 'Chest proud, knees tracking gently outward over toes.',
-              alternatives: ['Bulgarian Split Squat', 'Bodyweight Squats'],
-              videoUrl: 'https://www.youtube.com/watch?v=MeIiIdhvXT4'
-            },
-            {
-              id: 'w-ex-6',
-              exerciseId: 'ex-rdl',
-              exerciseName: 'Romanian Deadlift (RDL)',
-              targetMuscle: 'Hamstrings',
-              equipment: 'Dumbbells',
-              sets: 3,
-              reps: '10-12',
-              restSeconds: 75,
-              formNotes: 'Push hips backward into a wall, keeping spine locked in neutral.',
-              alternatives: ['Single Leg Glute Bridge'],
-              videoUrl: 'https://www.youtube.com/watch?v=JCXUYuzwNrM'
-            },
-            {
-              id: 'w-ex-7',
-              exerciseId: 'ex-plank',
-              exerciseName: 'Forearm Plank',
-              targetMuscle: 'Rectus Abdominis',
-              equipment: 'Bodyweight',
-              sets: 3,
-              reps: '60s hold',
-              restSeconds: 45,
-              formNotes: 'Engage glutes and actively drag elbows towards toes.',
-              alternatives: ['Deadbug', 'Side Plank'],
-              videoUrl: 'https://www.youtube.com/watch?v=pSHjTRCQxIw'
-            }
-          ]
-        },
-        {
-          id: 'day-3',
-          dayName: 'Day 3 (Wednesday)',
-          dayOrder: 3,
-          focus: 'Active Recovery & Mobility',
-          isRestDay: true,
-          estimatedDurationMins: 20,
-          warmup: ['20-30 min brisk outdoor walking'],
-          cooldown: ['Gentle spinal cat-cow and hip openers'],
-          exercises: []
-        },
-        {
-          id: 'day-4',
-          dayName: 'Day 4 (Thursday)',
-          dayOrder: 4,
-          focus: 'Upper Body Hypertrophy & Pull Focus',
-          isRestDay: false,
-          estimatedDurationMins: p.workoutDurationMins,
-          warmup: ['Band pull aparts (20 reps)', 'Arm rotations'],
-          cooldown: ['Lats doorway stretch'],
-          exercises: [
-            {
-              id: 'w-ex-8',
-              exerciseId: 'ex-pull-up',
-              exerciseName: 'Pull-Up',
-              targetMuscle: 'Latissimus Dorsi',
-              equipment: 'Pull-up Bar',
-              sets: 3,
-              reps: '6-8',
-              restSeconds: 90,
-              formNotes: 'Drive elbows down to waist, full extension at bottom.',
-              alternatives: ['Dumbbell Bent-Over Row'],
-              videoUrl: 'https://www.youtube.com/watch?v=eGo4IYlbE5g'
-            },
-            {
-              id: 'w-ex-9',
-              exerciseId: 'ex-push-up',
-              exerciseName: 'Standard Push-Up',
-              targetMuscle: 'Pectorals',
-              equipment: 'Bodyweight',
-              sets: 3,
-              reps: '12-15',
-              restSeconds: 60,
-              formNotes: 'Rigid body line, elbows 45 degrees.',
-              alternatives: ['Incline Push-ups'],
-              videoUrl: 'https://www.youtube.com/watch?v=IODxDxX7oi4'
-            },
-            {
-              id: 'w-ex-10',
-              exerciseId: 'ex-tricep-extension',
-              exerciseName: 'Overhead Tricep Extension',
-              targetMuscle: 'Triceps',
-              equipment: 'Dumbbells',
-              sets: 3,
-              reps: '12-15',
-              restSeconds: 45,
-              formNotes: 'Keep elbows tucked, isolate triceps.',
-              alternatives: ['Bench Dips'],
-              videoUrl: 'https://www.youtube.com/watch?v=-Vyt2QdsR7E'
-            }
-          ]
-        },
-        {
-          id: 'day-5',
-          dayName: 'Day 5 (Friday)',
-          dayOrder: 5,
-          focus: 'Unilateral Legs & Core Finisher',
-          isRestDay: false,
-          estimatedDurationMins: p.workoutDurationMins,
-          warmup: ['Hip openers and glute bridges'],
-          cooldown: ['Quad and hamstring stretches'],
-          exercises: [
-            {
-              id: 'w-ex-11',
-              exerciseId: 'ex-bulgarian-split-squat',
-              exerciseName: 'Bulgarian Split Squat',
-              targetMuscle: 'Quadriceps',
-              equipment: 'Dumbbells',
-              sets: 3,
-              reps: '10 per leg',
-              restSeconds: 75,
-              formNotes: 'Load 85% of weight on front foot, torso tall.',
-              alternatives: ['Walking Lunges'],
-              videoUrl: 'https://www.youtube.com/watch?v=2C-uNgKwPLE'
-            },
-            {
-              id: 'w-ex-12',
-              exerciseId: 'ex-lateral-raise',
-              exerciseName: 'Lateral Dumbbell Raise',
-              targetMuscle: 'Lateral Deltoids',
-              equipment: 'Dumbbells',
-              sets: 3,
-              reps: '12-15',
-              restSeconds: 45,
-              formNotes: 'Lead with elbows, strict controlled tempo.',
-              alternatives: ['Resistance Band Lateral Raise'],
-              videoUrl: 'https://www.youtube.com/watch?v=3VcKaXpzqRo'
-            }
-          ]
-        }
-      ]
-    };
-    setWorkoutPlan(newPlan);
-    persist('aurafit_workout_plan', newPlan);
-  };
-
-  const createDefaultDiet = (p: FitnessProfile) => {
-    const newDiet: MealPlan = {
-      id: 'diet_default',
-      userId: p.userId,
-      title: 'South Indian High-Protein Recomposition Plan',
-      targetCalories: p.targetCalories,
-      targetProteinG: p.targetProteinG,
-      targetCarbsG: p.targetCarbsG,
-      targetFatG: p.targetFatG,
-      targetFiberG: 28,
-      dietType: p.dietType,
-      cuisine: 'South Indian & Tamil',
-      aiGenerated: true,
-      isActive: true,
-      createdAt: new Date().toISOString(),
-      meals: [
-        {
-          id: 'meal-1',
-          mealType: 'breakfast',
-          title: 'Idli with Sambar & Boiled Eggs',
-          portionDescription: '3 steamed idlis + 1 bowl mixed vegetable sambar + 2 whole boiled eggs',
-          calories: 414,
-          proteinG: 22.1,
-          carbsG: 52.8,
-          fatG: 12.6,
-          fiberG: 5.5,
-          alternatives: [
-            {
-              title: 'Egg Dosa with Mint Chutney',
-              portion: '2 medium dosas with 2 eggs cooked on top',
-              calories: 430,
-              proteinG: 24.0,
-              carbsG: 48.0,
-              fatG: 14.0,
-              notes: 'Crispy and rich in high-bioavailability protein'
-            },
-            {
-              title: 'Vegetable Oats Upma with Paneer',
-              portion: '1 bowl oats upma with 80g fresh paneer cubes',
-              calories: 395,
-              proteinG: 21.0,
-              carbsG: 45.0,
-              fatG: 13.5,
-              notes: 'Slow-burning low GI carbohydrates'
-            }
-          ]
-        },
-        {
-          id: 'meal-2',
-          mealType: 'lunch',
-          title: 'Pepper Chicken Breast with Steamed Rice & Dal',
-          portionDescription: '160g chicken breast in mild Tamil pepper curry, 1 cup cooked rice, 1 bowl dal',
-          calories: 540,
-          proteinG: 43.5,
-          carbsG: 58.0,
-          fatG: 10.5,
-          fiberG: 5.0,
-          alternatives: [
-            {
-              title: 'Meen (Fish) Curry with Boiled Red Rice',
-              portion: '160g sea bass or rohu fillet curry + 1 cup rice',
-              calories: 490,
-              proteinG: 38.0,
-              carbsG: 54.0,
-              fatG: 9.0,
-              notes: 'Rich in EPA/DHA Omega-3 for joint health'
-            },
-            {
-              title: 'Paneer Tikka with Curd Rice & Cucumber',
-              portion: '150g grilled paneer + 1 bowl thayir sadam',
-              calories: 520,
-              proteinG: 26.0,
-              carbsG: 48.0,
-              fatG: 24.0,
-              notes: 'Probiotic support for digestive gut flora'
-            }
-          ]
-        },
-        {
-          id: 'meal-3',
-          mealType: 'evening_snack',
-          title: 'Chana Sundal & Green Tea',
-          portionDescription: '1 cup boiled chickpea sundal with mustard seeds & fresh coconut (150g)',
-          calories: 220,
-          proteinG: 11.5,
-          carbsG: 34.0,
-          fatG: 4.2,
-          fiberG: 8.5,
-          alternatives: [
-            {
-              title: 'Whey Protein Shake with 15 Almonds',
-              portion: '1 scoop whey in cold water + 15 raw almonds',
-              calories: 235,
-              proteinG: 28.0,
-              carbsG: 6.0,
-              fatG: 9.5,
-              notes: 'Fast-digesting post-training nourishment'
-            }
-          ]
-        },
-        {
-          id: 'meal-4',
-          mealType: 'dinner',
-          title: 'Whole Wheat Phulkas with Dal Tadka & Curd',
-          portionDescription: '2 soft phulkas, 1 large bowl yellow moong dal, 1 cup probiotic curd',
-          calories: 420,
-          proteinG: 20.0,
-          carbsG: 62.0,
-          fatG: 8.5,
-          fiberG: 8.0,
-          alternatives: [
-            {
-              title: 'Grilled Herb Chicken Salad with Lemon Dressing',
-              portion: '150g sliced chicken breast over greens & tomatoes',
-              calories: 360,
-              proteinG: 38.0,
-              carbsG: 12.0,
-              fatG: 8.0,
-              notes: 'Light evening meal for deep uninterrupted sleep'
-            }
-          ]
-        }
-      ]
-    };
-    setMealPlan(newDiet);
-    persist('aurafit_meal_plan', newDiet);
-  };
-
   // Profile save — also stamp the userId so data ownership is clear
   const saveProfile = async (newProfile: FitnessProfile) => {
     const stamped = { ...newProfile, userId: uid, id: newProfile.id || uid };
@@ -747,121 +499,232 @@ export function FitnessStoreProvider({ children, userId }: { children: ReactNode
     persist('profile', stamped);
   };
 
-  // AI Workout Generation
-  const generateNewWorkoutPlan = async () => {
-    setIsLoadingAI(true);
-    try {
-      const res = await fetch('/api/ai/generate-workout', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profile }),
-      });
+  // ------------------------------------------------------------------------------
+  // AI PLAN GENERATION (Groq via /api/ai/*; no local or template fallbacks)
+  // ------------------------------------------------------------------------------
 
-      if (!res.ok) throw new Error('API failed');
-      const data = await res.json();
-      
+  const generateNewWorkoutPlan = async (
+    options?: Partial<WorkoutGenerationOptions>,
+    profileOverride?: FitnessProfile
+  ): Promise<boolean> => {
+    const sourceProfile = profileOverride ?? profile;
+    const resolvedOptions: WorkoutGenerationOptions = { ...defaultWorkoutOptions(sourceProfile), ...options };
+    lastWorkoutRequestRef.current = { options, profile: profileOverride };
+    setWorkoutGeneration({ status: 'loading' });
+
+    try {
+      const data = await postAI<WorkoutApiResponse>('/api/ai/generate-workout', {
+        profile: sourceProfile,
+        options: resolvedOptions,
+      });
+      const usedOptions = data.options ?? resolvedOptions;
+
       const newPlan: WorkoutPlan = {
         id: `plan_${Date.now()}`,
-        userId: profile.userId,
+        userId: uid,
         title: data.plan.title,
         description: data.plan.description,
-        goal: profile.primaryGoal,
+        goal: sourceProfile.primaryGoal,
         splitType: data.plan.splitType,
-        daysPerWeek: profile.workoutDaysPerWeek,
+        workoutType: usedOptions.workoutType,
+        preferredActivities: usedOptions.preferredActivities,
+        goalSummary: data.plan.goalSummary,
+        coachAdvice: data.plan.coachAdvice,
+        daysPerWeek: data.plan.days.filter(d => !d.isRestDay).length,
         durationWeeks: 4,
         aiGenerated: true,
-        aiModel: 'llama-3.3-70b-versatile',
+        aiModel: data.meta.model,
         isActive: true,
+        generationOptions: usedOptions,
+        warnings: data.meta.warnings,
         createdAt: new Date().toISOString(),
-        days: data.plan.days.map((d: any, idx: number) => ({
-          id: `day_${idx + 1}`,
+        days: data.plan.days.map(d => ({
+          id: `day_${d.dayOrder}`,
           dayName: d.dayName,
-          dayOrder: d.dayOrder || idx + 1,
+          dayOrder: d.dayOrder,
           focus: d.focus,
-          isRestDay: Boolean(d.isRestDay),
-          estimatedDurationMins: d.estimatedDurationMins || profile.workoutDurationMins,
-          warmup: d.warmup || [],
-          cooldown: d.cooldown || [],
-          exercises: (d.exercises || []).map((e: any, eIdx: number) => ({
-            id: `w_ex_${idx}_${eIdx}`,
+          sessionType: d.sessionType,
+          isRestDay: d.isRestDay,
+          estimatedDurationMins: d.estimatedDurationMins,
+          warmup: d.warmup,
+          cooldown: d.cooldown,
+          exercises: d.exercises.map((e, eIdx) => ({
+            id: `w_ex_${d.dayOrder}_${eIdx}`,
+            exerciseId: e.exerciseId,
             exerciseName: e.exerciseName,
+            category: e.category,
             targetMuscle: e.targetMuscle,
             equipment: e.equipment,
             sets: e.sets,
             reps: e.reps,
+            durationMins: e.durationMins ?? undefined,
+            intensity: e.intensity ?? undefined,
             restSeconds: e.restSeconds,
-            tempo: e.tempo,
-            formNotes: e.formNotes,
-            alternatives: e.alternatives || [],
-            videoUrl: e.videoUrl || 'https://www.youtube.com/watch?v=MeIiIdhvXT4'
-          }))
-        }))
+            tempo: e.tempo ?? undefined,
+            formNotes: e.formNotes ?? undefined,
+            instructions: e.instructions,
+            alternatives: e.alternatives,
+            videoUrl: e.videoUrl,
+          })),
+        })),
       };
 
-      setWorkoutPlan(newPlan);
-      persist('workout_plan', newPlan);
+      const saved = await saveNewPlan(uid, 'workout', newPlan);
+      setWorkoutPlan(saved.plan);
+      persist('workout_plan', saved.plan);
+      setWorkoutPlanHistory(prev => [saved.plan, ...prev.map(p => ({ ...p, isActive: false }))].slice(0, 20));
+      setWorkoutGeneration({
+        status: 'success',
+        warnings: data.meta.warnings,
+        storageNote: saved.error ? `Saved on this device only — Supabase error: ${saved.error}` : undefined,
+      });
+      return true;
     } catch (err) {
-      console.warn('API route call error, falling back to instant local generation:', err);
-      createDefaultPlan(profile);
-    } finally {
-      setIsLoadingAI(false);
+      const { message, retryable, details } = describeError(err);
+      setWorkoutGeneration({ status: 'error', error: message, retryable, details });
+      return false;
     }
   };
 
-  // AI Diet Generation
-  const generateNewDietPlan = async () => {
-    setIsLoadingAI(true);
-    try {
-      const res = await fetch('/api/ai/generate-diet', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profile }),
-      });
+  const generateNewDietPlan = async (
+    options?: Partial<DietGenerationOptions>,
+    profileOverride?: FitnessProfile
+  ): Promise<boolean> => {
+    const sourceProfile = profileOverride ?? profile;
+    const resolvedOptions: DietGenerationOptions = { ...defaultDietOptions(sourceProfile), ...options };
+    lastDietRequestRef.current = { options, profile: profileOverride };
+    setDietGeneration({ status: 'loading' });
 
-      if (!res.ok) throw new Error('API failed');
-      const data = await res.json();
+    try {
+      const data = await postAI<DietApiResponse>('/api/ai/generate-diet', {
+        profile: sourceProfile,
+        options: resolvedOptions,
+      });
+      const usedOptions = data.options ?? resolvedOptions;
 
       const newDiet: MealPlan = {
         id: `diet_${Date.now()}`,
-        userId: profile.userId,
+        userId: uid,
         title: data.plan.title,
         targetCalories: data.plan.targetCalories,
         targetProteinG: data.plan.targetProteinG,
         targetCarbsG: data.plan.targetCarbsG,
         targetFatG: data.plan.targetFatG,
-        targetFiberG: data.plan.targetFiberG || 30,
-        dietType: profile.dietType,
-        cuisine: profile.cuisinePreferences.join(', '),
+        targetFiberG: 30,
+        dietType: sourceProfile.dietType,
+        cuisine: usedOptions.cuisines.join(', '),
+        cuisineNotes: data.plan.cuisineNotes,
+        hydrationAdvice: data.plan.hydrationAdvice,
         aiGenerated: true,
+        aiModel: data.meta.model,
         isActive: true,
+        generationOptions: usedOptions,
+        warnings: data.meta.warnings,
         createdAt: new Date().toISOString(),
-        meals: data.plan.meals.map((m: any, mIdx: number) => ({
-          id: `meal_${mIdx + 1}`,
-          mealType: m.mealType,
-          title: m.title,
-          portionDescription: m.portionDescription,
-          calories: m.calories,
-          proteinG: m.proteinG,
-          carbsG: m.carbsG,
-          fatG: m.fatG,
-          fiberG: m.fiberG || 0,
-          alternatives: m.alternatives || []
-        }))
+        days: data.plan.days.map(d => ({
+          id: `mday_${d.dayOrder}`,
+          dayName: d.dayName,
+          dayOrder: d.dayOrder,
+          theme: d.theme ?? undefined,
+          totals: d.totals,
+          meals: d.meals.map((m, mIdx) => ({
+            id: `meal_${d.dayOrder}_${mIdx + 1}`,
+            mealType: m.mealType,
+            title: m.title,
+            portionDescription: m.portionDescription,
+            calories: Math.round(m.calories),
+            proteinG: round1(m.proteinG),
+            carbsG: round1(m.carbsG),
+            fatG: round1(m.fatG),
+            fiberG: round1(m.fiberG),
+            ingredients: m.ingredients,
+            prepNotes: m.prepNotes ?? undefined,
+            alternatives: m.alternatives.map(a => ({
+              title: a.title,
+              portion: a.portion,
+              calories: Math.round(a.calories),
+              proteinG: round1(a.proteinG),
+              carbsG: round1(a.carbsG),
+              fatG: round1(a.fatG),
+              notes: a.notes ?? undefined,
+            })),
+          })),
+        })),
       };
 
-      setMealPlan(newDiet);
-      persist('meal_plan', newDiet);
+      const saved = await saveNewPlan(uid, 'meal', newDiet);
+      setMealPlan(saved.plan);
+      persist('meal_plan', saved.plan);
+      setMealPlanHistory(prev => [saved.plan, ...prev.map(p => ({ ...p, isActive: false }))].slice(0, 20));
+      setDietGeneration({
+        status: 'success',
+        warnings: data.meta.warnings,
+        storageNote: saved.error ? `Saved on this device only — Supabase error: ${saved.error}` : undefined,
+      });
+      return true;
     } catch (err) {
-      console.warn('Diet API error, fallback:', err);
-      createDefaultDiet(profile);
-    } finally {
-      setIsLoadingAI(false);
+      const { message, retryable, details } = describeError(err);
+      setDietGeneration({ status: 'error', error: message, retryable, details });
+      return false;
     }
+  };
+
+  const retryWorkoutGeneration = () => {
+    const last = lastWorkoutRequestRef.current;
+    return generateNewWorkoutPlan(last?.options, last?.profile);
+  };
+
+  const retryDietGeneration = () => {
+    const last = lastDietRequestRef.current;
+    return generateNewDietPlan(last?.options, last?.profile);
+  };
+
+  const dismissGenerationState = (kind: PlanKind) => {
+    if (kind === 'workout') setWorkoutGeneration(IDLE);
+    else setDietGeneration(IDLE);
+  };
+
+  const activateHistoricalPlan = async (kind: PlanKind, planId: string) => {
+    if (kind === 'workout') {
+      const target = workoutPlanHistory.find(p => p.id === planId);
+      if (!target) return;
+      const active = { ...target, isActive: true };
+      setWorkoutPlan(active);
+      persist('workout_plan', active);
+      setWorkoutPlanHistory(prev => prev.map(p => ({ ...p, isActive: p.id === planId })));
+    } else {
+      const target = mealPlanHistory.find(p => p.id === planId);
+      if (!target) return;
+      const active = { ...target, isActive: true };
+      setMealPlan(active);
+      persist('meal_plan', active);
+      setMealPlanHistory(prev => prev.map(p => ({ ...p, isActive: p.id === planId })));
+    }
+    const { error } = await activatePlan(uid, kind, planId);
+    if (error) setHistoryError(`Could not update the active plan in Supabase: ${error}`);
+  };
+
+  const deleteHistoricalPlan = async (kind: PlanKind, planId: string) => {
+    if (kind === 'workout') {
+      setWorkoutPlanHistory(prev => prev.filter(p => p.id !== planId));
+      if (workoutPlan?.id === planId) {
+        setWorkoutPlan(null);
+        localStorage.removeItem(key('workout_plan'));
+      }
+    } else {
+      setMealPlanHistory(prev => prev.filter(p => p.id !== planId));
+      if (mealPlan?.id === planId) {
+        setMealPlan(null);
+        localStorage.removeItem(key('meal_plan'));
+      }
+    }
+    const { error } = await deletePlan(uid, kind, planId);
+    if (error) setHistoryError(`Could not delete the plan from Supabase: ${error}`);
   };
 
   // Start interactive workout
   const startWorkout = (dayId: string): WorkoutSession => {
-    const targetDay = workoutPlan?.days.find(d => d.id === dayId) || workoutPlan?.days[0];
+    const targetDay = workoutPlan?.days.find(d => d.id === dayId) || workoutPlan?.days.find(d => !d.isRestDay);
     const newSession: WorkoutSession = {
       id: `sess_${Date.now()}`,
       userId: profile.userId,
@@ -873,17 +736,35 @@ export function FitnessStoreProvider({ children, userId }: { children: ReactNode
       totalVolumeKg: 0,
       caloriesBurned: 0,
       completionPercentage: 0,
-      exercises: (targetDay?.exercises || []).map(ex => ({
-        exerciseName: ex.exerciseName,
-        sets: Array.from({ length: ex.sets }).map((_, idx) => ({
-          setNumber: idx + 1,
-          targetReps: parseInt(ex.reps) || 10,
-          completedReps: parseInt(ex.reps) || 10,
-          weightKg: ex.equipment.toLowerCase().includes('bodyweight') ? 0 : 15,
-          completed: false,
-          rpe: 7
-        }))
-      }))
+      exercises: (targetDay?.exercises || []).map(ex => {
+        const timed = isTimedCategory(ex.category, ex.durationMins);
+        // Timed blocks (runs, sport sessions) track minutes per set instead of reps × load.
+        const target = timed
+          ? Math.max(1, Math.round((ex.durationMins || parseInt(ex.reps) || 10) / Math.max(1, ex.sets)))
+          : parseInt(ex.reps) || 10;
+        const loaded = !timed && ex.category !== 'mobility' && !ex.equipment.toLowerCase().includes('bodyweight');
+        return {
+          exerciseId: ex.exerciseId,
+          exerciseName: ex.exerciseName,
+          category: ex.category,
+          targetMuscle: ex.targetMuscle,
+          equipment: ex.equipment,
+          durationMins: ex.durationMins,
+          restSeconds: ex.restSeconds,
+          formNotes: ex.formNotes,
+          instructions: ex.instructions,
+          alternatives: ex.alternatives,
+          videoUrl: ex.videoUrl,
+          sets: Array.from({ length: ex.sets }).map((_, idx) => ({
+            setNumber: idx + 1,
+            targetReps: target,
+            completedReps: target,
+            weightKg: loaded ? 15 : 0,
+            completed: false,
+            rpe: 7
+          }))
+        };
+      })
     };
 
     setActiveSession(newSession);
@@ -1000,85 +881,108 @@ export function FitnessStoreProvider({ children, userId }: { children: ReactNode
   };
 
   // Chat with AI Coach
-  const sendChatMessage = async (userText: string) => {
-    const userMsg: AIMessage = { id: `msg_${Date.now()}`, role: 'user', content: userText, timestamp: new Date().toISOString() };
-    const newHistory = [...chatMessages, userMsg];
-    setChatMessages(newHistory);
-
+  const requestCoachReply = async (history: AIMessage[], userText: string) => {
+    setChatError(null);
     try {
-      const res = await fetch('/api/ai/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          profile,
-          recentSessions: workoutSessions.slice(0, 3),
-          chatHistory: newHistory,
-          userMessage: userText
-        })
+      const data = await postAI<{ reply: string }>('/api/ai/chat', {
+        profile,
+        recentSessions: workoutSessions.slice(0, 3),
+        // The server appends userMessage itself, so send the history before it.
+        chatHistory: history.slice(0, -1).map(m => ({ role: m.role, content: m.content })),
+        userMessage: userText
       });
-
-      if (!res.ok) throw new Error('Chat API failed');
-      const data = await res.json();
       const assistantMsg: AIMessage = {
         id: `msg_asst_${Date.now()}`,
         role: 'assistant',
         content: data.reply,
         timestamp: new Date().toISOString()
       };
-      const finalHistory = [...newHistory, assistantMsg];
+      const finalHistory = [...history, assistantMsg];
       setChatMessages(finalHistory);
       persist('chat', finalHistory);
-    } catch {
-      // Deterministic fallback response if offline
-      const reply = `I'm analyzing your request regarding "${userText}"! As your coach, I recommend focusing on consistent execution, matching your daily protein intake (${profile.targetProteinG}g), and taking adequate rest between your ${profile.workoutDaysPerWeek} planned workout days.`;
-      const fallbackMsg: AIMessage = { id: `msg_asst_${Date.now()}`, role: 'assistant', content: reply, timestamp: new Date().toISOString() };
-      const finalHistory = [...newHistory, fallbackMsg];
-      setChatMessages(finalHistory);
-      persist('chat', finalHistory);
+    } catch (err) {
+      setChatError(describeError(err).message);
+      persist('chat', history);
     }
   };
 
-  // Replace a meal with one of its smart alternatives
-  const replaceMealWithAlternative = (mealId: string, altIndex: number) => {
-    if (!mealPlan) return;
-    const targetMeal = mealPlan.meals.find(m => m.id === mealId);
-    if (!targetMeal || !targetMeal.alternatives[altIndex]) return;
-
-    const alt = targetMeal.alternatives[altIndex];
-    const previousMealAsAlt = {
-      title: targetMeal.title,
-      portion: targetMeal.portionDescription,
-      calories: targetMeal.calories,
-      proteinG: targetMeal.proteinG,
-      carbsG: targetMeal.carbsG,
-      fatG: targetMeal.fatG,
-      notes: 'Previous selection'
-    };
-
-    const updatedAlternatives = [...targetMeal.alternatives];
-    updatedAlternatives.splice(altIndex, 1, previousMealAsAlt);
-
-    const updatedMeals = mealPlan.meals.map(m => {
-      if (m.id === mealId) {
-        return {
-          ...m,
-          title: alt.title,
-          portionDescription: alt.portion,
-          calories: alt.calories,
-          proteinG: alt.proteinG,
-          carbsG: alt.carbsG,
-          fatG: alt.fatG,
-          alternatives: updatedAlternatives
-        };
-      }
-      return m;
-    });
-
-    const updatedPlan = { ...mealPlan, meals: updatedMeals };
-    setMealPlan(updatedPlan);
-    persist('meal_plan', updatedPlan);
+  const sendChatMessage = async (userText: string) => {
+    const userMsg: AIMessage = { id: `msg_${Date.now()}`, role: 'user', content: userText, timestamp: new Date().toISOString() };
+    const newHistory = [...chatMessages, userMsg];
+    setChatMessages(newHistory);
+    await requestCoachReply(newHistory, userText);
   };
 
+  const retryLastChatMessage = async () => {
+    const last = chatMessages[chatMessages.length - 1];
+    if (!last || last.role !== 'user') return;
+    await requestCoachReply(chatMessages, last.content);
+  };
+
+  // Replace a meal with one of its AI-suggested alternatives
+  const replaceMealWithAlternative = (mealId: string, altIndex: number) => {
+    if (!mealPlan) return;
+
+    const swapIn = (meals: MealItem[]): MealItem[] | null => {
+      const targetMeal = meals.find(m => m.id === mealId);
+      if (!targetMeal || !targetMeal.alternatives[altIndex]) return null;
+
+      const alt = targetMeal.alternatives[altIndex];
+      const previousMealAsAlt = {
+        title: targetMeal.title,
+        portion: targetMeal.portionDescription,
+        calories: targetMeal.calories,
+        proteinG: targetMeal.proteinG,
+        carbsG: targetMeal.carbsG,
+        fatG: targetMeal.fatG,
+        notes: 'Previous selection'
+      };
+
+      const updatedAlternatives = [...targetMeal.alternatives];
+      updatedAlternatives.splice(altIndex, 1, previousMealAsAlt);
+
+      return meals.map(m => m.id === mealId
+        ? {
+            ...m,
+            title: alt.title,
+            portionDescription: alt.portion,
+            calories: alt.calories,
+            proteinG: alt.proteinG,
+            carbsG: alt.carbsG,
+            fatG: alt.fatG,
+            // Alternatives don't carry fibre / ingredients; avoid showing stale values.
+            fiberG: 0,
+            ingredients: [],
+            prepNotes: alt.notes,
+            alternatives: updatedAlternatives
+          }
+        : m);
+    };
+
+    let updatedPlan: MealPlan | null = null;
+    if (mealPlan.days?.length) {
+      let changed = false;
+      const days = mealPlan.days.map(day => {
+        const meals = swapIn(day.meals);
+        if (!meals) return day;
+        changed = true;
+        return { ...day, meals, totals: computeMealDayTotals(meals) };
+      });
+      if (changed) updatedPlan = { ...mealPlan, days };
+    } else if (mealPlan.meals) {
+      const meals = swapIn(mealPlan.meals);
+      if (meals) updatedPlan = { ...mealPlan, meals };
+    }
+    if (!updatedPlan) return;
+
+    const finalPlan = updatedPlan;
+    setMealPlan(finalPlan);
+    persist('meal_plan', finalPlan);
+    setMealPlanHistory(prev => prev.map(p => (p.id === finalPlan.id ? finalPlan : p)));
+    updatePlan(uid, 'meal', finalPlan).then(({ error }) => {
+      if (error) setHistoryError(`Could not save the meal swap to Supabase: ${error}`);
+    });
+  };
   const markNotificationRead = (id: string) => {
     setNotifications(prev => prev.map(n => n.id === id ? { ...n, read: true } : n));
   };
@@ -1088,14 +992,21 @@ export function FitnessStoreProvider({ children, userId }: { children: ReactNode
   };
 
   const resetToDemo = () => {
-    // Only clear keys belonging to current user
+    // Only clear keys belonging to current user (plans saved in Supabase are kept)
     Object.keys(localStorage)
       .filter(k => k.startsWith(`aurafit_${uid}_`))
       .forEach(k => localStorage.removeItem(k));
-    lastUidRef.current = null; // force re-init
+    clearLocalPlanHistory(uid);
     setProfile(uid === 'demo' ? DEMO_PROFILE : { ...DEMO_PROFILE, id: uid, userId: uid, name: '', email: '' });
-    createDefaultPlan(DEMO_PROFILE);
-    createDefaultDiet(DEMO_PROFILE);
+    setWorkoutPlan(null);
+    setMealPlan(null);
+    if (uid === 'demo') {
+      setWorkoutPlanHistory([]);
+      setMealPlanHistory([]);
+    }
+    setWorkoutGeneration(IDLE);
+    setDietGeneration(IDLE);
+    setChatError(null);
     if (uid === 'demo') {
       seedSampleSessions();
       seedSampleMeals();
@@ -1117,21 +1028,33 @@ export function FitnessStoreProvider({ children, userId }: { children: ReactNode
       value={{
         profile,
         workoutPlan,
+        workoutPlanHistory,
         workoutSessions,
         activeSession,
         mealPlan,
+        mealPlanHistory,
         mealLogs,
         waterLoggedMl,
         weightLogs,
         bodyMeasurements,
         chatMessages,
+        chatError,
         badges,
         notifications,
         weeklyReview,
         isLoadingAI,
+        isHistoryLoading,
+        historyError,
+        workoutGeneration,
+        dietGeneration,
         saveProfile,
         generateNewWorkoutPlan,
         generateNewDietPlan,
+        retryWorkoutGeneration,
+        retryDietGeneration,
+        dismissGenerationState,
+        activateHistoricalPlan,
+        deleteHistoricalPlan,
         startWorkout,
         updateActiveSession,
         finishActiveWorkout,
@@ -1142,6 +1065,7 @@ export function FitnessStoreProvider({ children, userId }: { children: ReactNode
         logWeight,
         logBodyMeasurement,
         sendChatMessage,
+        retryLastChatMessage,
         replaceMealWithAlternative,
         markNotificationRead,
         clearAllNotifications,

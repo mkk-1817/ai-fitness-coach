@@ -28,13 +28,17 @@ import {
   DietType,
   WorkoutDuration,
   PreferredTime,
-  TrainingLocation 
+  TrainingLocation,
+  WorkoutType
 } from '@/types/fitness';
+import { ActivityPicker, WorkoutTypePicker } from '@/components/workout/WorkoutPreferencePickers';
+import { workoutTypeLabel } from '@/lib/fitness/workout-options';
 import { computeAllMetrics, getBMICategory } from '@/lib/utils/calculations';
 
 export function OnboardingWizard() {
   const router = useRouter();
   const { profile, saveProfile, generateNewWorkoutPlan, generateNewDietPlan, isLoadingAI } = useFitnessStore();
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const { user } = useAuth();
 
   const [step, setStep] = useState(1);
@@ -77,6 +81,8 @@ export function OnboardingWizard() {
   const [durationMins, setDurationMins] = useState<WorkoutDuration>(profile.workoutDurationMins || 45);
   const [preferredTime, setPreferredTime] = useState<PreferredTime>(profile.preferredWorkoutTime || 'morning');
   const [trainingLocation, setTrainingLocation] = useState<TrainingLocation>(profile.trainingLocation || 'home');
+  const [workoutType, setWorkoutType] = useState<WorkoutType>(profile.preferredWorkoutType || 'mixed');
+  const [activities, setActivities] = useState<string[]>(profile.preferredActivities || []);
 
   // Health Safety
   const [injuries, setInjuries] = useState<string[]>(profile.injuries || []);
@@ -136,6 +142,8 @@ export function OnboardingWizard() {
       preferredWorkoutTime: preferredTime,
       trainingLocation,
       availableEquipment: otherEquipment.trim() ? [...equipmentList, otherEquipment.trim()] : equipmentList,
+      preferredWorkoutType: workoutType,
+      preferredActivities: activities,
       injuries,
       avoidExercises,
       dietType,
@@ -155,11 +163,15 @@ export function OnboardingWizard() {
       updatedAt: new Date().toISOString(),
     };
 
+    setIsSubmitting(true);
     await saveProfile(finalProfile);
-    await Promise.all([
-      generateNewWorkoutPlan(),
-      generateNewDietPlan(),
-    ]);
+    // Generate from the profile just entered (store state updates asynchronously). Runs in the
+    // background while the dashboard shows progress; sequential calls stay within Groq rate limits
+    // and any failure surfaces a retryable error state.
+    void (async () => {
+      await generateNewWorkoutPlan(undefined, finalProfile);
+      await generateNewDietPlan(undefined, finalProfile);
+    })();
 
     router.push('/');
   };
@@ -588,6 +600,17 @@ export function OnboardingWizard() {
                   </select>
                 </div>
               </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-300 block mb-2">Preferred Workout Type</label>
+                <WorkoutTypePicker value={workoutType} onChange={setWorkoutType} />
+              </div>
+
+              <div>
+                <label className="text-xs font-bold text-slate-300 block mb-1">Sports & Cardio You Enjoy</label>
+                <p className="text-[11px] text-slate-500 mb-2">Your AI plan will schedule these into your week (optional).</p>
+                <ActivityPicker value={activities} onChange={setActivities} />
+              </div>
             </div>
           </div>
         )}
@@ -800,7 +823,8 @@ export function OnboardingWizard() {
               <div className="p-3.5 rounded-2xl bg-slate-950 border border-white/5">
                 <span className="text-slate-500 uppercase font-bold text-[10px]">Schedule</span>
                 <p className="font-bold text-white mt-1">{daysPerWeek} Days / Week</p>
-                <p className="text-slate-400">{durationMins} Mins • {trainingLocation}</p>
+                <p className="text-slate-400">{durationMins} Mins • {trainingLocation} • {workoutTypeLabel(workoutType)}</p>
+                {activities.length > 0 && <p className="text-cyan-400 truncate">{activities.join(', ')}</p>}
               </div>
 
               <div className="p-3.5 rounded-2xl bg-slate-950 border border-white/5">
@@ -830,11 +854,11 @@ export function OnboardingWizard() {
 
             <button
               onClick={handleFinalSubmit}
-              disabled={isLoadingAI}
+              disabled={isLoadingAI || isSubmitting}
               className="w-full py-4 rounded-2xl bg-gradient-to-r from-emerald-500 via-teal-400 to-emerald-400 text-slate-950 font-black text-sm tracking-wide shadow-xl shadow-emerald-500/30 hover:scale-[1.01] active:scale-[0.98] transition flex items-center justify-center gap-2 cursor-pointer"
             >
               <Sparkles className="h-5 w-5" />
-              <span>{isLoadingAI ? 'CRAFTING YOUR AI PLANS...' : 'GENERATE MY PERSONALIZED AI PLAN'}</span>
+              <span>{isLoadingAI || isSubmitting ? 'CRAFTING YOUR AI PLANS...' : 'GENERATE MY PERSONALIZED AI PLAN'}</span>
             </button>
           </div>
         )}
