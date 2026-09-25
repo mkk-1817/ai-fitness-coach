@@ -166,7 +166,8 @@ ${MEAL_JSON_CONTRACT}
 4. Diet type "${humanize(profile.dietType)}" is strict: vegetarian = no meat, fish, seafood or eggs; eggetarian = vegetarian + eggs; vegan = no animal products at all (no dairy, ghee, honey, eggs); pescatarian = vegetarian + fish/seafood + eggs; non vegetarian = anything.
 5. NEVER include allergens [${list(profile.allergies)}] or avoided foods [${list(profile.foodsAvoided)}], including inside alternatives.
 6. Give portions in household measures and grams (e.g. "3 idli (≈180 g) + 1 cup sambar").
-7. Every meal gets 1-2 alternatives with similar calories and protein that also respect all rules.`;
+7. Every meal gets exactly 1 concise alternative with similar calories and protein that also respects all rules.
+8. Keep every string short and practical. Use compact ingredient lists, portion descriptions, prep notes and alternative notes so the complete 7-day JSON fits in the response.`;
 
   const userPrompt = `Create a 7-day meal plan for:
 ${profileSummary(profile)}

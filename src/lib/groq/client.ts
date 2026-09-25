@@ -278,7 +278,7 @@ export async function generateAIDietPlan(
     userPrompt,
     review: plan => reviewMealPlan(plan, profile),
     temperature: 0.6,
-    maxTokens: 12000,
+    maxTokens: 20000,
   });
   return { ...result, data: { ...result.data, days: [...result.data.days].sort((a, b) => a.dayOrder - b.dayOrder) } };
 }
