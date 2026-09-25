@@ -1,14 +1,28 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Search, Plus, Trash2, CheckCircle2, Utensils } from 'lucide-react';
+import { Search, Trash2, Utensils, Sparkles, Loader2, AlertTriangle, RotateCcw } from 'lucide-react';
 import { useFitnessStore } from '@/lib/store/fitness-store';
-import { FOOD_DATABASE, FoodItemReference } from '@/lib/data/food-data';
+import { postAI, describeError } from '@/lib/ai/request';
+
+/** AI nutrition estimate returned by /api/ai/food-lookup (schema-validated server-side). */
+interface FoodEstimate {
+  name: string;
+  portion: string;
+  calories: number;
+  proteinG: number;
+  carbsG: number;
+  fatG: number;
+  fiberG: number;
+  cuisine?: string | null;
+}
 
 export function NutritionLogger() {
-  const { mealLogs, logMeal, deleteMealLog } = useFitnessStore();
+  const { mealLogs, logMeal, deleteMealLog, profile } = useFitnessStore();
 
   const [searchQuery, setSearchQuery] = useState('');
+  const [lookupResults, setLookupResults] = useState<FoodEstimate[]>([]);
+  const [lookupState, setLookupState] = useState<{ status: 'idle' | 'loading' | 'error' | 'done'; error?: string; query?: string }>({ status: 'idle' });
   const [selectedMealType, setSelectedMealType] = useState('lunch');
   const [showCustomForm, setShowCustomForm] = useState(false);
 
@@ -23,24 +37,39 @@ export function NutritionLogger() {
   const today = new Date().toISOString().split('T')[0];
   const todayMeals = mealLogs.filter(m => m.date === today);
 
-  const filteredFoods = FOOD_DATABASE.filter(f => 
-    f.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    f.cuisine.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  const runLookup = async (query: string) => {
+    const q = query.trim();
+    if (q.length < 2) return;
+    setLookupState({ status: 'loading', query: q });
+    try {
+      const data = await postAI<{ items: FoodEstimate[] }>('/api/ai/food-lookup', {
+        query: q,
+        cuisines: profile.cuisinePreferences,
+        dietType: profile.dietType,
+      });
+      setLookupResults(data.items);
+      setLookupState({ status: 'done', query: q });
+    } catch (err) {
+      setLookupResults([]);
+      setLookupState({ status: 'error', error: describeError(err).message, query: q });
+    }
+  };
 
-  const handleLogPredefined = (food: FoodItemReference) => {
+  const handleLogEstimate = (food: FoodEstimate) => {
     logMeal({
       date: today,
       mealType: selectedMealType,
       foodName: food.name,
       portion: food.portion,
-      calories: food.calories,
-      proteinG: food.proteinG,
-      carbsG: food.carbsG,
-      fatG: food.fatG,
-      fiberG: food.fiberG,
+      calories: Math.round(food.calories),
+      proteinG: Math.round(food.proteinG * 10) / 10,
+      carbsG: Math.round(food.carbsG * 10) / 10,
+      fatG: Math.round(food.fatG * 10) / 10,
+      fiberG: Math.round(food.fiberG * 10) / 10,
     });
     setSearchQuery('');
+    setLookupResults([]);
+    setLookupState({ status: 'idle' });
   };
 
   const handleCustomSubmit = (e: React.FormEvent) => {
@@ -52,11 +81,11 @@ export function NutritionLogger() {
       mealType: selectedMealType,
       foodName: customName.trim(),
       portion: customPortion,
-      calories: parseInt(customCalories) || 250,
-      proteinG: parseFloat(customProtein) || 15,
-      carbsG: parseFloat(customCarbs) || 30,
-      fatG: parseFloat(customFat) || 8,
-      fiberG: 2,
+      calories: parseInt(customCalories) || 0,
+      proteinG: parseFloat(customProtein) || 0,
+      carbsG: parseFloat(customCarbs) || 0,
+      fatG: parseFloat(customFat) || 0,
+      fiberG: 0,
     });
 
     setCustomName('');
@@ -75,7 +104,7 @@ export function NutritionLogger() {
             <Utensils className="h-5 w-5 text-amber-400" />
             Log Foods & Custom Meals
           </h2>
-          <p className="text-xs text-slate-400 mt-0.5">Quick search from verified Indian & global nutritional database</p>
+          <p className="text-xs text-slate-400 mt-0.5">Describe any food or dish — AI estimates its nutrition (review before logging)</p>
         </div>
 
         <div className="flex items-center gap-2">
@@ -128,6 +157,8 @@ export function NutritionLogger() {
               placeholder="Calories"
               value={customCalories}
               onChange={(e) => setCustomCalories(e.target.value)}
+              required
+              min={0}
               className="px-3 py-1.5 bg-slate-900 border border-white/10 rounded-xl text-xs text-white placeholder-slate-500"
             />
             <input
@@ -161,44 +192,71 @@ export function NutritionLogger() {
         </form>
       )}
 
-      {/* SEARCH DATABASE */}
-      <div className="relative">
-        <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
-        <input
-          type="text"
-          value={searchQuery}
-          onChange={(e) => setSearchQuery(e.target.value)}
-          placeholder="Search Indian & global food items (e.g. Idli, Dosa, Chicken, Paneer, Sundal, Eggs)..."
-          className="w-full pl-10 pr-4 py-2.5 rounded-2xl bg-slate-950 border border-white/10 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-emerald-500"
-        />
-      </div>
+      {/* AI FOOD LOOKUP */}
+      <form
+        onSubmit={e => {
+          e.preventDefault();
+          runLookup(searchQuery);
+        }}
+        className="flex gap-2"
+      >
+        <div className="relative flex-1">
+          <Search className="absolute left-3.5 top-3 h-4 w-4 text-slate-400" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            maxLength={200}
+            placeholder="e.g. 2 ragi dosa with peanut chutney, 1 plate chicken biryani, 200ml filter coffee"
+            className="w-full pl-10 pr-4 py-2.5 rounded-2xl bg-slate-950 border border-white/10 text-xs text-white placeholder-slate-400 focus:outline-none focus:border-emerald-500"
+          />
+        </div>
+        <button
+          type="submit"
+          disabled={searchQuery.trim().length < 2 || lookupState.status === 'loading'}
+          className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-2xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 text-xs font-bold transition"
+        >
+          {lookupState.status === 'loading' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+          <span>Estimate</span>
+        </button>
+      </form>
 
-      {/* SEARCH RESULTS DROP-LIST */}
-      {searchQuery && (
-        <div className="max-h-60 overflow-y-auto space-y-1.5 p-2 rounded-2xl bg-slate-950 border border-white/10">
-          {filteredFoods.length === 0 ? (
-            <p className="text-xs text-slate-400 text-center py-4">No matching food found. Try custom meal logging!</p>
-          ) : (
-            filteredFoods.slice(0, 6).map(food => (
-              <div
-                key={food.id}
-                className="p-2.5 rounded-xl hover:bg-slate-900 flex items-center justify-between transition"
-              >
-                <div>
-                  <p className="text-xs font-bold text-white">{food.name}</p>
-                  <p className="text-[11px] text-slate-400">
-                    {food.portion} • {food.calories} kcal • <span className="text-rose-400 font-semibold">{food.proteinG}g P</span>
-                  </p>
-                </div>
-                <button
-                  onClick={() => handleLogPredefined(food)}
-                  className="px-3 py-1 bg-emerald-500/20 hover:bg-emerald-500 text-emerald-300 hover:text-slate-950 text-xs font-bold rounded-lg transition"
-                >
-                  + Add
-                </button>
+      {lookupState.status === 'error' && (
+        <div className="p-3 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center gap-3 text-xs text-rose-200" role="alert">
+          <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0" />
+          <span className="flex-1">{lookupState.error}</span>
+          <button
+            onClick={() => lookupState.query && runLookup(lookupState.query)}
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 font-bold border border-rose-500/30"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            Retry
+          </button>
+        </div>
+      )}
+
+      {lookupState.status === 'done' && lookupResults.length > 0 && (
+        <div className="max-h-72 overflow-y-auto space-y-1.5 p-2 rounded-2xl bg-slate-950 border border-white/10">
+          <p className="text-[10px] text-slate-500 px-2.5 pt-1">AI estimates for &ldquo;{lookupState.query}&rdquo;</p>
+          {lookupResults.map((food, idx) => (
+            <div
+              key={`${food.name}-${idx}`}
+              className="p-2.5 rounded-xl hover:bg-slate-900 flex items-center justify-between transition"
+            >
+              <div>
+                <p className="text-xs font-bold text-white">{food.name}</p>
+                <p className="text-[11px] text-slate-400">
+                  {food.portion} • {Math.round(food.calories)} kcal • <span className="text-rose-400 font-semibold">{Math.round(food.proteinG)}g P</span> • {Math.round(food.carbsG)}g C • {Math.round(food.fatG)}g F
+                </p>
               </div>
-            ))
-          )}
+              <button
+                onClick={() => handleLogEstimate(food)}
+                className="px-3 py-1 bg-emerald-500/20 hover:bg-emerald-500 text-emerald-300 hover:text-slate-950 text-xs font-bold rounded-lg transition"
+              >
+                + Add
+              </button>
+            </div>
+          ))}
         </div>
       )}
 
@@ -210,7 +268,7 @@ export function NutritionLogger() {
 
         {todayMeals.length === 0 ? (
           <div className="py-8 text-center text-xs text-slate-500 bg-slate-950/40 rounded-2xl border border-white/5">
-            No foods logged yet today. Use the search bar above or log directly from your meal plan!
+            No foods logged yet today. Describe what you ate above or log directly from your meal plan!
           </div>
         ) : (
           <div className="space-y-2">

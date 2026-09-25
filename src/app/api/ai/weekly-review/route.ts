@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { aiErrorResponse } from '@/lib/groq/route-helpers';
 import { generateAIWeeklyReview } from '@/lib/groq/client';
 
 export async function POST(req: NextRequest) {
@@ -12,11 +13,7 @@ export async function POST(req: NextRequest) {
 
     const review = await generateAIWeeklyReview(profile, completedSessions || []);
     return NextResponse.json({ success: true, review });
-  } catch (error: any) {
-    console.error('Error in AI weekly review route:', error);
-    return NextResponse.json(
-      { error: error?.message || 'Failed to generate weekly review' },
-      { status: 500 }
-    );
+  } catch (error) {
+    return aiErrorResponse(error, 'weekly-review');
   }
 }

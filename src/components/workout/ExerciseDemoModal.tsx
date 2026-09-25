@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { X, Play, CheckCircle2, AlertTriangle, Lightbulb, ArrowRightLeft, Dumbbell } from 'lucide-react';
+import { X, Play, CheckCircle2, AlertTriangle, Lightbulb, ArrowRightLeft, ExternalLink } from 'lucide-react';
 import { ExerciseItem } from '@/types/fitness';
 
 interface ExerciseDemoModalProps {
@@ -60,11 +60,23 @@ export function ExerciseDemoModal({ exercise, onClose }: ExerciseDemoModalProps)
               allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
               allowFullScreen
             />
+          ) : exercise.videoUrl ? (
+            <a
+              href={exercise.videoUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-center p-6 group"
+            >
+              <Play className="h-10 w-10 text-emerald-400 mx-auto mb-2 opacity-80 group-hover:scale-110 transition" />
+              <p className="text-sm font-semibold text-white flex items-center justify-center gap-1.5">
+                Find demonstration videos <ExternalLink className="h-3.5 w-3.5" />
+              </p>
+              <p className="text-xs text-slate-400 mt-1">Opens a YouTube search for &ldquo;{exercise.name}&rdquo;</p>
+            </a>
           ) : (
             <div className="text-center p-6">
-              <Play className="h-10 w-10 text-emerald-400 mx-auto mb-2 opacity-80" />
-              <p className="text-sm font-semibold text-white">Demonstration Ready</p>
-              <p className="text-xs text-slate-400 mt-1">Video demonstration source active</p>
+              <Play className="h-10 w-10 text-slate-500 mx-auto mb-2 opacity-80" />
+              <p className="text-sm font-semibold text-white">No demonstration video available</p>
             </div>
           )}
         </div>

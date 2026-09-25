@@ -12,12 +12,14 @@ import {
   Utensils, 
   HelpCircle,
   Clock,
-  ArrowRight
+  ArrowRight,
+  AlertTriangle,
+  RotateCcw
 } from 'lucide-react';
 import { useFitnessStore } from '@/lib/store/fitness-store';
 
 export function AICoachChat() {
-  const { profile, chatMessages, sendChatMessage } = useFitnessStore();
+  const { profile, chatMessages, chatError, sendChatMessage, retryLastChatMessage } = useFitnessStore();
   const [inputText, setInputText] = useState('');
   const [isSending, setIsSending] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -30,6 +32,16 @@ export function AICoachChat() {
     'How much protein should I eat per meal?',
     'Can you make tomorrow\'s workout easier?'
   ];
+
+  const handleRetry = async () => {
+    if (isSending) return;
+    setIsSending(true);
+    try {
+      await retryLastChatMessage();
+    } finally {
+      setIsSending(false);
+    }
+  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -136,6 +148,25 @@ export function AICoachChat() {
               <Sparkles className="h-4 w-4 text-emerald-400 animate-pulse" />
               <span>Analyzing user biometrics and generating sports science response...</span>
             </div>
+          </div>
+        )}
+
+        {chatError && !isSending && (
+          <div className="flex items-start gap-3 p-3 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-200">
+            <AlertTriangle className="h-4 w-4 text-rose-400 shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="font-bold text-rose-300">The AI coach couldn&apos;t respond</p>
+              <p className="mt-0.5">{chatError}</p>
+            </div>
+            {chatMessages[chatMessages.length - 1]?.role === 'user' && (
+              <button
+                onClick={handleRetry}
+                className="shrink-0 inline-flex items-center gap-1 px-3 py-1.5 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 text-rose-200 font-bold border border-rose-500/30 transition"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Retry
+              </button>
+            )}
           </div>
         )}
 

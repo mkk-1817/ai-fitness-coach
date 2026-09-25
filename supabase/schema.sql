@@ -91,11 +91,12 @@ CREATE TABLE IF NOT EXISTS public.dietary_preferences (
 );
 
 -- 7. Exercise Library (Public Read-Only for Users, Admin writable)
+-- Media reference only: AI plans are not limited to these entries; matching names get verified demo videos.
 CREATE TABLE IF NOT EXISTS public.exercise_library (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     name TEXT NOT NULL UNIQUE,
     slug TEXT NOT NULL UNIQUE,
-    category TEXT NOT NULL CHECK (category IN ('Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Glutes', 'Core', 'Cardio', 'Mobility', 'Stretching')),
+    category TEXT NOT NULL CHECK (category IN ('Chest', 'Back', 'Shoulders', 'Arms', 'Legs', 'Glutes', 'Core', 'Cardio', 'Mobility', 'Stretching', 'Strength', 'Sports', 'HIIT')),
     target_muscle TEXT NOT NULL,
     secondary_muscles TEXT[],
     equipment_required TEXT NOT NULL,
@@ -122,6 +123,10 @@ CREATE TABLE IF NOT EXISTS public.workout_plans (
     duration_weeks INT DEFAULT 4,
     ai_generated BOOLEAN DEFAULT TRUE,
     ai_model TEXT DEFAULT 'llama-3.3-70b-versatile',
+    workout_type TEXT DEFAULT 'mixed' CHECK (workout_type IN ('strength', 'cardio', 'sports', 'hiit', 'mobility', 'mixed')),
+    preferred_activities TEXT[] DEFAULT ARRAY[]::TEXT[],
+    generation_options JSONB DEFAULT '{}'::jsonb,
+    plan_data JSONB, -- full schema-validated AI plan (days, exercises, sports & cardio blocks)
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -208,9 +213,14 @@ CREATE TABLE IF NOT EXISTS public.meal_plans (
     target_fiber_g INT DEFAULT 30,
     diet_type TEXT NOT NULL,
     cuisine TEXT,
+    duration_days INT DEFAULT 7,
     ai_generated BOOLEAN DEFAULT TRUE,
+    ai_model TEXT,
+    generation_options JSONB DEFAULT '{}'::jsonb,
+    plan_data JSONB, -- full schema-validated 7-day AI meal plan
     is_active BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 -- 14. Meals
@@ -345,6 +355,8 @@ CREATE TABLE IF NOT EXISTS public.notifications (
 -- ==============================================================================
 CREATE INDEX IF NOT EXISTS idx_fitness_profiles_user ON public.fitness_profiles(user_id);
 CREATE INDEX IF NOT EXISTS idx_workout_plans_user ON public.workout_plans(user_id);
+CREATE INDEX IF NOT EXISTS idx_workout_plans_user_created ON public.workout_plans(user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_meal_plans_user_created ON public.meal_plans(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_workout_days_plan ON public.workout_days(workout_plan_id);
 CREATE INDEX IF NOT EXISTS idx_workout_exercises_day ON public.workout_exercises(workout_day_id);
 CREATE INDEX IF NOT EXISTS idx_workout_sessions_user ON public.workout_sessions(user_id);

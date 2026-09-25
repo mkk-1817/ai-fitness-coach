@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { aiErrorResponse } from '@/lib/groq/route-helpers';
 import { chatWithAICoach } from '@/lib/groq/client';
 
 export async function POST(req: NextRequest) {
@@ -12,11 +13,7 @@ export async function POST(req: NextRequest) {
 
     const reply = await chatWithAICoach(profile, recentSessions || [], chatHistory || [], userMessage);
     return NextResponse.json({ success: true, reply });
-  } catch (error: any) {
-    console.error('Error in AI Coach chat route:', error);
-    return NextResponse.json(
-      { error: error?.message || 'Failed to process AI Coach chat' },
-      { status: 500 }
-    );
+  } catch (error) {
+    return aiErrorResponse(error, 'chat');
   }
 }

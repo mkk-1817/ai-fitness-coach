@@ -2,74 +2,141 @@
 
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { 
-  Dumbbell, 
-  Clock, 
-  Sparkles, 
-  Play, 
-  Video, 
-  RotateCcw, 
-  Calendar, 
-  ChevronRight, 
-  Info,
+import {
+  Dumbbell,
+  Clock,
+  Sparkles,
+  Play,
+  Video,
+  RotateCcw,
   CheckCircle2,
   SlidersHorizontal,
-  X
+  Activity,
+  Lightbulb,
 } from 'lucide-react';
 import { useFitnessStore } from '@/lib/store/fitness-store';
 import { ExerciseDemoModal } from './ExerciseDemoModal';
-import { EXERCISE_LIBRARY_DATA } from '@/lib/data/exercise-data';
-import { ExerciseItem } from '@/types/fitness';
+import { WorkoutGeneratorModal } from './WorkoutGeneratorModal';
+import { GenerationStatus } from '@/components/ai/GenerationStatus';
+import { PlanHistoryPanel } from '@/components/ai/PlanHistoryPanel';
+import { buildExerciseDetails } from '@/lib/fitness/exercise-media';
+import { CATEGORY_BADGE_STYLES, isTimedCategory, workoutTypeLabel } from '@/lib/fitness/workout-options';
+import { ExerciseItem, WorkoutExercise, WorkoutGenerationOptions } from '@/types/fitness';
 
 export function WorkoutPlanView() {
   const router = useRouter();
-  const { workoutPlan, profile, startWorkout, generateNewWorkoutPlan, isLoadingAI } = useFitnessStore();
+  const {
+    workoutPlan,
+    workoutPlanHistory,
+    workoutGeneration,
+    isHistoryLoading,
+    historyError,
+    startWorkout,
+    generateNewWorkoutPlan,
+    retryWorkoutGeneration,
+    dismissGenerationState,
+    activateHistoricalPlan,
+    deleteHistoricalPlan,
+  } = useFitnessStore();
 
-  const [selectedDayId, setSelectedDayId] = useState<string>(
-    workoutPlan?.days[0]?.id || 'day-1'
-  );
+  const [selectedDayId, setSelectedDayId] = useState<string | null>(null);
   const [demoExercise, setDemoExercise] = useState<ExerciseItem | null>(null);
-  const [showRegenerateModal, setShowRegenerateModal] = useState(false);
-  const [adjustmentReason, setAdjustmentReason] = useState('more_progressive_overload');
+  const [generatorOptions, setGeneratorOptions] = useState<WorkoutGenerationOptions | undefined>(undefined);
+  const [showGenerator, setShowGenerator] = useState(false);
 
+  const isGenerating = workoutGeneration.status === 'loading';
   const selectedDay = workoutPlan?.days.find(d => d.id === selectedDayId) || workoutPlan?.days[0];
+
+  const openGenerator = (options?: WorkoutGenerationOptions) => {
+    setGeneratorOptions(options);
+    setShowGenerator(true);
+  };
 
   const handleStartWorkout = (dayId: string) => {
     startWorkout(dayId);
     router.push('/workout/player');
   };
 
-  const handleOpenDemo = (name: string) => {
-    const found = EXERCISE_LIBRARY_DATA.find(e => e.name.toLowerCase() === name.toLowerCase()) || EXERCISE_LIBRARY_DATA[0];
-    setDemoExercise(found);
+  const handleRegenerateFromHistory = (planId: string) => {
+    const plan = workoutPlanHistory.find(p => p.id === planId);
+    generateNewWorkoutPlan(plan?.generationOptions);
   };
+
+  const status = (
+    <GenerationStatus
+      state={workoutGeneration}
+      label="workout plan"
+      onRetry={retryWorkoutGeneration}
+      onDismiss={() => dismissGenerationState('workout')}
+      onAdjust={() => openGenerator(workoutPlan?.generationOptions)}
+    />
+  );
+
+  const history = (
+    <PlanHistoryPanel
+      title="Workout Plan History"
+      items={workoutPlanHistory.map(p => ({
+        id: p.id,
+        title: p.title,
+        createdAt: p.createdAt,
+        isActive: p.id === workoutPlan?.id,
+        tags: [workoutTypeLabel(p.workoutType), ...(p.preferredActivities || []).slice(0, 3)],
+      }))}
+      isLoading={isHistoryLoading}
+      error={historyError}
+      isGenerating={isGenerating}
+      onActivate={id => activateHistoricalPlan('workout', id)}
+      onRegenerate={handleRegenerateFromHistory}
+      onDelete={id => deleteHistoricalPlan('workout', id)}
+    />
+  );
+
+  const generatorModal = showGenerator && (
+    <WorkoutGeneratorModal initialOptions={generatorOptions} onClose={() => setShowGenerator(false)} />
+  );
 
   if (!workoutPlan) {
     return (
-      <div className="text-center py-16">
-        <Dumbbell className="h-12 w-12 text-emerald-400 mx-auto mb-3" />
-        <h2 className="text-xl font-bold text-white">No Workout Plan Loaded</h2>
-        <button
-          onClick={() => generateNewWorkoutPlan()}
-          disabled={isLoadingAI}
-          className="mt-4 px-6 py-3 bg-emerald-500 text-slate-950 font-bold rounded-2xl"
-        >
-          {isLoadingAI ? 'Generating Plan...' : 'Generate Plan with AI'}
-        </button>
+      <div className="space-y-6">
+        {status}
+        <div className="text-center py-16 rounded-3xl border border-white/10 bg-slate-900/80">
+          <Dumbbell className="h-12 w-12 text-emerald-400 mx-auto mb-3" />
+          <h2 className="text-xl font-bold text-white">No Workout Plan Yet</h2>
+          <p className="text-xs text-slate-400 mt-2 max-w-md mx-auto">
+            Choose strength, cardio, sports, HIIT, mobility or a mix — the AI builds a full week around your profile, equipment and favourite activities.
+          </p>
+          <button
+            onClick={() => openGenerator()}
+            disabled={isGenerating}
+            className="mt-5 inline-flex items-center gap-2 px-6 py-3 bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 text-slate-950 font-bold rounded-2xl"
+          >
+            <Sparkles className="h-4 w-4" />
+            {isGenerating ? 'Generating Plan…' : 'Generate Plan with AI'}
+          </button>
+        </div>
+        {workoutPlanHistory.length > 0 && history}
+        {generatorModal}
       </div>
     );
   }
 
   return (
     <div className="space-y-6">
+      {status}
+
       {/* HEADER BANNER */}
       <div className="rounded-3xl border border-white/10 bg-slate-900/90 p-6 sm:p-8 shadow-xl backdrop-blur-md">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
           <div>
-            <div className="flex items-center gap-2 mb-2">
+            <div className="flex flex-wrap items-center gap-2 mb-2">
               <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-emerald-500/15 text-emerald-400 border border-emerald-500/30">
                 {workoutPlan.splitType}
               </span>
+              {workoutPlan.workoutType && (
+                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase bg-purple-500/15 text-purple-300 border border-purple-500/30">
+                  {workoutTypeLabel(workoutPlan.workoutType)}
+                </span>
+              )}
               <span className="text-xs text-slate-400">
                 {workoutPlan.daysPerWeek} Training Days/Week • {workoutPlan.durationWeeks} Weeks
               </span>
@@ -80,23 +147,41 @@ export function WorkoutPlanView() {
             <p className="text-xs sm:text-sm text-slate-300 mt-2 max-w-2xl leading-relaxed">
               {workoutPlan.description}
             </p>
+            {workoutPlan.preferredActivities && workoutPlan.preferredActivities.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 mt-3">
+                <Activity className="h-3.5 w-3.5 text-cyan-400" />
+                {workoutPlan.preferredActivities.map(a => (
+                  <span key={a} className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">
+                    {a}
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
             <button
-              onClick={() => setShowRegenerateModal(true)}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 text-xs font-bold text-slate-200 border border-white/10 transition"
+              onClick={() => openGenerator(workoutPlan.generationOptions)}
+              disabled={isGenerating}
+              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-2xl bg-slate-800 hover:bg-slate-700 disabled:opacity-60 text-xs font-bold text-slate-200 border border-white/10 transition"
             >
               <SlidersHorizontal className="h-4 w-4 text-emerald-400" />
-              <span>Regenerate / Adapt Plan</span>
+              <span>{isGenerating ? 'Generating…' : 'Regenerate / Adapt Plan'}</span>
             </button>
           </div>
         </div>
 
+        {workoutPlan.coachAdvice && (
+          <div className="mt-5 p-3.5 rounded-2xl bg-slate-950/60 border border-white/5 text-xs text-slate-300 flex items-start gap-2">
+            <Lightbulb className="h-4 w-4 text-amber-400 shrink-0 mt-0.5" />
+            <span>{workoutPlan.coachAdvice}</span>
+          </div>
+        )}
+
         {/* DAYS TAB SELECTOR */}
-        <div className="mt-8 flex gap-2 overflow-x-auto pb-2 border-b border-white/10 no-scrollbar">
+        <div className="mt-6 flex gap-2 overflow-x-auto pb-2 border-b border-white/10 no-scrollbar">
           {workoutPlan.days.map((day) => {
-            const isSelected = day.id === selectedDayId;
+            const isSelected = day.id === selectedDay?.id;
             return (
               <button
                 key={day.id}
@@ -114,7 +199,7 @@ export function WorkoutPlanView() {
                   {day.focus.length > 22 ? `${day.focus.substring(0, 22)}...` : day.focus}
                 </span>
                 <span className="text-[10px] text-slate-500 mt-1">
-                  {day.isRestDay ? 'Rest & Recovery' : `${day.exercises.length} exercises`}
+                  {day.isRestDay ? 'Rest & Recovery' : `${workoutTypeLabel(day.sessionType)} • ${day.exercises.length} blocks`}
                 </span>
               </button>
             );
@@ -153,14 +238,23 @@ export function WorkoutPlanView() {
 
           {/* REST DAY VIEW */}
           {selectedDay.isRestDay ? (
-            <div className="py-12 text-center max-w-md mx-auto">
+            <div className="py-10 text-center max-w-md mx-auto">
               <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-teal-500/10 text-teal-400 mb-3 border border-teal-500/20">
                 <RotateCcw className="h-7 w-7" />
               </div>
               <h3 className="text-lg font-bold text-white mb-2">Rest & Active Recovery</h3>
-              <p className="text-xs text-slate-400 leading-relaxed">
-                Muscles grow and rebuild while resting! Spend today taking a 20-30 minute brisk walk, hydrating well, and completing mobility stretches.
-              </p>
+              {[...selectedDay.warmup, ...selectedDay.cooldown].length > 0 ? (
+                <ul className="text-xs text-slate-300 space-y-1.5 text-left inline-block">
+                  {[...selectedDay.warmup, ...selectedDay.cooldown].map((item, idx) => (
+                    <li key={idx} className="flex items-center gap-2">
+                      <span className="h-1.5 w-1.5 rounded-full bg-teal-400" />
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-xs text-slate-400">Recover, hydrate and sleep well today.</p>
+              )}
             </div>
           ) : (
             <div className="mt-6 space-y-6">
@@ -185,52 +279,17 @@ export function WorkoutPlanView() {
               {/* EXERCISES LIST */}
               <div className="space-y-3">
                 <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider">
-                  Exercise Breakdown
+                  Session Breakdown
                 </h4>
 
                 <div className="space-y-3">
                   {selectedDay.exercises.map((ex, idx) => (
-                    <div
+                    <ExerciseRow
                       key={ex.id || idx}
-                      className="p-4 sm:p-5 rounded-2xl bg-slate-950/70 border border-white/5 hover:border-white/10 transition flex flex-col sm:flex-row sm:items-center justify-between gap-4"
-                    >
-                      <div className="flex items-start gap-4">
-                        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-900 border border-white/10 text-emerald-400 font-black text-sm">
-                          {idx + 1}
-                        </div>
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <h3 className="text-base font-bold text-white">{ex.exerciseName}</h3>
-                            <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-900 text-slate-400 border border-white/5">
-                              {ex.targetMuscle}
-                            </span>
-                          </div>
-                          <p className="text-xs text-slate-400 mt-1">
-                            Equipment: <strong className="text-slate-200">{ex.equipment}</strong>
-                            {ex.formNotes && ` • ${ex.formNotes}`}
-                          </p>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between sm:justify-end gap-5 pt-2 sm:pt-0 border-t sm:border-t-0 border-white/5">
-                        <div className="text-right">
-                          <div className="text-sm font-black text-white">
-                            {ex.sets} Sets × {ex.reps}
-                          </div>
-                          <div className="text-[11px] text-slate-400">
-                            {ex.restSeconds}s rest
-                          </div>
-                        </div>
-
-                        <button
-                          onClick={() => handleOpenDemo(ex.exerciseName)}
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-xs font-bold text-emerald-400 border border-white/10 transition"
-                        >
-                          <Video className="h-4 w-4" />
-                          <span>Demo</span>
-                        </button>
-                      </div>
-                    </div>
+                      index={idx}
+                      exercise={ex}
+                      onDemo={() => setDemoExercise(buildExerciseDetails(ex))}
+                    />
                   ))}
                 </div>
               </div>
@@ -256,70 +315,8 @@ export function WorkoutPlanView() {
         </div>
       )}
 
-      {/* REGENERATE / ADAPT PLAN MODAL */}
-      {showRegenerateModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
-          <div className="w-full max-w-lg rounded-3xl border border-white/10 bg-slate-900 p-6 shadow-2xl">
-            <div className="flex items-center justify-between pb-3 border-b border-white/10 mb-4">
-              <div className="flex items-center gap-2">
-                <Sparkles className="h-5 w-5 text-emerald-400" />
-                <h3 className="text-base font-bold text-white">Regenerate / Adapt Plan with AI</h3>
-              </div>
-              <button onClick={() => setShowRegenerateModal(false)} className="text-slate-400 hover:text-white">
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            <p className="text-xs text-slate-300 mb-4">
-              Specify what changed so our Groq AI service can recalculate and adapt your weekly structure:
-            </p>
-
-            <div className="space-y-2 mb-6">
-              {[
-                { key: 'more_progressive_overload', label: 'Workouts feel too easy (Increase Progression)' },
-                { key: 'less_time', label: 'Short on time (Condense to 30-minute high intensity)' },
-                { key: 'travel_home', label: 'Traveling / Hotel (Dumbbells and Bodyweight only)' },
-                { key: 'injury_limitation', label: 'Deload joint / Accommodate muscle soreness' },
-                { key: 'new_goal', label: 'Change primary focus to Fat Loss & Conditioning' },
-              ].map(opt => (
-                <button
-                  key={opt.key}
-                  type="button"
-                  onClick={() => setAdjustmentReason(opt.key)}
-                  className={`w-full p-3 rounded-xl text-left text-xs font-bold border transition ${
-                    adjustmentReason === opt.key
-                      ? 'bg-emerald-500/15 border-emerald-400 text-emerald-300'
-                      : 'bg-slate-950 border-white/5 text-slate-400 hover:bg-slate-800'
-                  }`}
-                >
-                  {opt.label}
-                </button>
-              ))}
-            </div>
-
-            <div className="flex items-center justify-end gap-3 pt-3 border-t border-white/10">
-              <button
-                type="button"
-                onClick={() => setShowRegenerateModal(false)}
-                className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-white"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  setShowRegenerateModal(false);
-                  await generateNewWorkoutPlan();
-                }}
-                disabled={isLoadingAI}
-                className="px-5 py-2.5 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-xs shadow-lg transition"
-              >
-                {isLoadingAI ? 'Generating...' : 'Regenerate Plan Now'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {history}
+      {generatorModal}
 
       {/* DEMO VIDEO MODAL */}
       {demoExercise && (
@@ -328,6 +325,56 @@ export function WorkoutPlanView() {
           onClose={() => setDemoExercise(null)}
         />
       )}
+    </div>
+  );
+}
+
+function ExerciseRow({ index, exercise: ex, onDemo }: { index: number; exercise: WorkoutExercise; onDemo: () => void }) {
+  const timed = isTimedCategory(ex.category, ex.durationMins);
+  return (
+    <div className="p-4 sm:p-5 rounded-2xl bg-slate-950/70 border border-white/5 hover:border-white/10 transition flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div className="flex items-start gap-4">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-900 border border-white/10 text-emerald-400 font-black text-sm">
+          {index + 1}
+        </div>
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-base font-bold text-white">{ex.exerciseName}</h3>
+            {ex.category && (
+              <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase border ${CATEGORY_BADGE_STYLES[ex.category]}`}>
+                {ex.category}
+              </span>
+            )}
+            <span className="px-2 py-0.5 rounded-md text-[10px] font-semibold bg-slate-900 text-slate-400 border border-white/5">
+              {ex.targetMuscle}
+            </span>
+          </div>
+          <p className="text-xs text-slate-400 mt-1">
+            Equipment: <strong className="text-slate-200">{ex.equipment}</strong>
+            {ex.intensity && ` • ${ex.intensity}`}
+            {ex.formNotes && ` • ${ex.formNotes}`}
+          </p>
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between sm:justify-end gap-5 pt-2 sm:pt-0 border-t sm:border-t-0 border-white/5">
+        <div className="text-right">
+          <div className="text-sm font-black text-white">
+            {timed ? (ex.sets > 1 ? `${ex.sets} × ${ex.reps}` : ex.reps) : `${ex.sets} Sets × ${ex.reps}`}
+          </div>
+          <div className="text-[11px] text-slate-400">
+            {timed && ex.durationMins ? `${ex.durationMins} min total` : `${ex.restSeconds}s rest`}
+          </div>
+        </div>
+
+        <button
+          onClick={onDemo}
+          className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-xs font-bold text-emerald-400 border border-white/10 transition"
+        >
+          <Video className="h-4 w-4" />
+          <span>How-to</span>
+        </button>
+      </div>
     </div>
   );
 }
