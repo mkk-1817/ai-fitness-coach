@@ -1,0 +1,12 @@
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  # These values are intentionally embedded by Next.js in public/browser output.
+  SECRETS_SCAN_OMIT_KEYS = "NEXT_PUBLIC_APP_NAME,NEXT_PUBLIC_APP_URL,NEXT_PUBLIC_SUPABASE_URL,NEXT_PUBLIC_SUPABASE_ANON_KEY"
+  # Netlify's Next.js adapter packages server/runtime values into these artifacts.
+  SECRETS_SCAN_OMIT_PATHS = ".next/**,.netlify/**"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
