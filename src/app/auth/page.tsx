@@ -16,6 +16,7 @@ export default function AuthPage() {
   const [password, setPassword] = useState('');
   const [fullName, setFullName] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [rememberMe, setRememberMe] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
@@ -59,7 +60,7 @@ export default function AuthPage() {
           router.replace('/onboarding');
         }
       } else {
-        const { error: err } = await signIn(email, password);
+        const { error: err } = await signIn(email, password, rememberMe);
         if (err) {
           setError(err.message);
         } else {
@@ -193,6 +194,34 @@ export default function AuthPage() {
                 </button>
               </div>
             </div>
+
+            {/* Remember me (sign in only) */}
+            {mode === 'signin' && (
+              <label
+                htmlFor="remember-me"
+                className="flex items-center gap-2.5 cursor-pointer select-none group"
+              >
+                <div className="relative">
+                  <input
+                    id="remember-me"
+                    type="checkbox"
+                    checked={rememberMe}
+                    onChange={(e) => setRememberMe(e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="h-4.5 w-4.5 h-[18px] w-[18px] rounded-[5px] border border-white/20 bg-slate-950/70 peer-checked:bg-emerald-500 peer-checked:border-emerald-500 transition-all flex items-center justify-center">
+                    {rememberMe && (
+                      <svg className="h-3 w-3 text-slate-950" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="2,6 5,9 10,3" />
+                      </svg>
+                    )}
+                  </div>
+                </div>
+                <span className="text-xs text-slate-400 group-hover:text-slate-300 transition-colors">
+                  Remember me for <span className="font-semibold text-emerald-400">30 days</span>
+                </span>
+              </label>
+            )}
 
             <button
               type="submit"

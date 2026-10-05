@@ -24,7 +24,7 @@ interface AuthContextType {
   isSupabaseConfigured: boolean;
 
   signUp: (email: string, password: string, fullName: string) => Promise<{ error: AuthError | null; needsEmailConfirm: boolean }>;
-  signIn: (email: string, password: string) => Promise<{ error: AuthError | null }>;
+  signIn: (email: string, password: string, rememberMe?: boolean) => Promise<{ error: AuthError | null }>;
   signOut: () => Promise<void>;
 }
 
@@ -106,11 +106,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     []
   );
 
-  const signIn = useCallback(async (email: string, password: string) => {
+  const signIn = useCallback(async (email: string, password: string, rememberMe = false) => {
     if (!isSupabaseConfigured || !supabase) {
       return { error: { message: 'Supabase not configured', name: 'AuthError', status: 500 } as AuthError };
     }
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    const THIRTY_DAYS_SECONDS = 30 * 24 * 60 * 60; // 2_592_000
+    const { error } = await supabase.auth.signInWithPassword({
+      email,
+      password,
+      options: rememberMe ? { expiresIn: THIRTY_DAYS_SECONDS } : undefined,
+    });
     return { error };
   }, []);
 
